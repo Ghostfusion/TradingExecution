@@ -135,12 +135,27 @@ Key contracts / non-negotiables (plan §4.4–4.12):
 ```
 TradingExecution/
 ├── README.md  CHANGELOG.md  docs/AGENT_ONBOARDING.md
-├── .github/                              # CI (placeholder)
-├── .gitignore  .env.example (later)
-├── signald/    # Phase A modules (landing): watch, normalizer, gates,
-│               # envelope, channels, notifier, audit, journal, alpaca_ref
-└── tests/      # hermetic; fixture artifacts, fake clock, injected transport
+├── pyproject.toml  .env.example
+├── signald/
+│   ├── config.py       env parsing + config hash (aliases ALPACA_API_KEY→alpaca_key)
+│   ├── schema.py       ResearchDecision validation/hash-pinning + SignalContract
+│   ├── mandate.py      hash-pinned mandate, expiry, re-sign + archive
+│   ├── normalizer.py   (build_signal_contract in schema.py) research→agnostic signal
+│   ├── gates.py        fail-closed gates (§4.4 list), reference completeness
+│   ├── alpaca_ref.py   reference reads via injectable transport seam (no orders)
+│   ├── stores.py       signals.jsonl/latest.json, journal, SHA-256 audit chain
+│   ├── notifier.py     webhook events, journal-first, never raises
+│   ├── kill_switch.py  sentinel + persisted HALT episode latch
+│   ├── watch.py        poll loop (decisions/ inbox)
+│   ├── processor.py    pipeline: validate→precheck→idempotency→ref→gates→envelope→persist
+│   ├── daemon.py       PID lockfile + heartbeat
+│   ├── cli.py          run/verify/status/sample/approve/init-mandate
+│   └── samples.py      demo research_decision.json generator
+└── tests/             53 hermetic tests (zero network)
 ```
+
+Quick loop: `py -3.12 -m pytest tests/ -q -p no:cacheprovider`;
+`py -3.12 -m signald run --once --dry-run` for a single pass.
 
 Plan and design live at the parent level: `../EXECUTION_IMPLEMENTATION_PLAN.md`,
 `../Master_deign.md`.

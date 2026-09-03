@@ -7,3 +7,8 @@ __pycache__/
 dist/
 build/
 *.log
+# runtime state (Phase A daemon)
+decisions/
+signals/
+audit/
+*.pid
