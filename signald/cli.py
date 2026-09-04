@@ -22,6 +22,7 @@ from .processor import SignalProcessor
 from .samples import write_sample
 from .stores import AuditChain, Journal, SignalStore
 from .watch import WatchLoop
+from .watchdog import DEFAULT_MAX_AGE_S, check_heartbeat
 
 
 def _build(cfg: Config) -> tuple[SignalProcessor, AuditChain]:
@@ -175,6 +176,38 @@ def cmd_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_notify_test(args: argparse.Namespace) -> int:
+    cfg = load_config(env_file=args.env, **({"notifier_url": args.url} if args.url else {}))
+    notifier = Notifier(url=cfg.notifier_url, timeout_s=cfg.notifier_timeout_s,
+                        retries=cfg.notifier_retries, transport=cfg.transport, now=cfg.now)
+    if not notifier.enabled:
+        print(
+            "notifier: not configured (set TRADINGEXEC_NOTIFIER_URL or pass --url)",
+            file=sys.stderr,
+        )
+        return 1
+    event = {"event": "signal", "ts": cfg.now().isoformat(timespec="seconds"),
+             "signal_id": "test", "detail": "notify-test from signald CLI"}
+    ok = notifier.send(event)
+    print(f"notifier: {'delivered' if ok else 'FAILED'}")
+    return 0 if ok else 1
+
+
+def cmd_watchdog(args: argparse.Namespace) -> int:
+    cfg = load_config(
+        env_file=args.env,
+        **({"heartbeat_path": args.heartbeat} if args.heartbeat else {}),
+    )
+    notifier = Notifier(url=cfg.notifier_url, timeout_s=cfg.notifier_timeout_s,
+                        retries=cfg.notifier_retries, transport=cfg.transport, now=cfg.now)
+    fresh = check_heartbeat(cfg.heartbeat_path, notifier, max_age_s=args.max_age)
+    print(
+        f"watchdog: {'fresh' if fresh else 'LOSS'} "
+        f"(max_age {args.max_age}s, heartbeat {cfg.heartbeat_path})"
+    )
+    return 0 if fresh else 1
+
+
 def cmd_init_mandate(args: argparse.Namespace) -> int:
     import os
     target = Path(args.mandate) if args.mandate else Path(
@@ -235,6 +268,19 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("--watch")
     sm.add_argument("--data")
     sm.set_defaults(func=cmd_sample)
+
+    nt = sub.add_parser("notify-test", help="send a test webhook to the configured notifier")
+    nt.add_argument("--url", default=None, help="override webhook URL")
+    nt.add_argument("--env")
+    nt.set_defaults(func=cmd_notify_test)
+
+    wd = sub.add_parser(
+        "watchdog", help="check daemon heartbeat; dispatch heartbeat_loss when stale"
+    )
+    wd.add_argument("--max-age", type=float, default=DEFAULT_MAX_AGE_S)
+    wd.add_argument("--heartbeat", default=None)
+    wd.add_argument("--env")
+    wd.set_defaults(func=cmd_watchdog)
 
     ap = sub.add_parser("approve", help="record operator approval/rejection (execution in M1)")
     ap.add_argument("action", choices=["approve", "reject"])

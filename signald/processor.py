@@ -66,6 +66,7 @@ class SignalProcessor:
             rd = parse_research_decision(raw)
         except (json.JSONDecodeError, OSError, ContractError) as exc:
             self.audit.append("rejected_invalid", f"{p.name}: {exc}", path=str(p))
+            self._notify_error("invalid_decision", f"{p.name}: {exc}")
             return ProcessResult("invalid", reasons=(str(exc),))
 
         # 2. prechecks: future date + ingest window
@@ -87,6 +88,7 @@ class SignalProcessor:
             if self.cfg.ref_required:
                 self.audit.append("rejected", f"reference unavailable: {exc}",
                                   ticker=rd.ticker, path=str(p))
+                self._notify_error("reference_unavailable", f"{rd.ticker}: {exc}")
                 return ProcessResult("blocked", reasons=(f"reference unavailable: {exc}",))
             ref = RefData()
             self.audit.append("warn", f"reference unavailable (ref_required=false): {exc}",
@@ -112,6 +114,7 @@ class SignalProcessor:
                 ticker=rd.ticker, decision_hash=rd.decision_hash,
                 gate_reasons=list(gate.reasons),
             )
+            self._notify_error("signal_blocked", f"{rd.ticker}: {'; '.join(gate.blocked)}")
             return ProcessResult("blocked", reasons=gate.blocked)
 
         # 7. envelope
@@ -138,6 +141,10 @@ class SignalProcessor:
             self.audit.append("notifier_failed", "webhook dispatch failed; signal persisted",
                               ticker=rd.ticker, signal_id=envelope["signal_id"])
         return ProcessResult("emitted", envelope=envelope, reasons=gate.reasons)
+
+    def _notify_error(self, source: str, detail: str) -> None:
+        if self.notifier.enabled:
+            self.notifier.send(self.notifier.error_event(source, detail))
 
     def _halted(self, reason: str, p: Path) -> ProcessResult:
         ep = read_episode(self.cfg.halt_latch_path) or {}

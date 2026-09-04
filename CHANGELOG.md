@@ -4,6 +4,17 @@ Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
 ## 2026-09-03
 
+- **Watchdog + notifier wiring + web signal feed.**
+  - `signald/watchdog.py` + CLI `watchdog` — heartbeat freshness check,
+    dispatches `heartbeat_loss` notifier event + non-zero exit when stale
+    (force-flatten arrives with M1).
+  - CLI `notify-test` — sends a test webhook to the configured notifier.
+  - Processor now dispatches notifier `error` events on invalid/blocked/
+    reference-unavailable outcomes (best-effort, journal-first).
+  - Missing `TradingExecution` signals dir + `GET /api/signals` (read-only)
+    in `trading_web` (capability `list_signals`, Dashboard signals panel,
+    `TRADINGEXEC_REPO` env, hermetic route test) — sibling-sync rule.
+  - 61 hermetic tests; ruff clean.
 - **Live Alpaca paper verification (real paper keys).** `TRADINGAGENTS_ALPACA_*`
   env names now load (prefix + `api_key_id`/`api_secret` aliases); real
   alpaca-py quote parsing fixed (flat `bid_price`/`ask_price` — markets closed
