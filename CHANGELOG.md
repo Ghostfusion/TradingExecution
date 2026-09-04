@@ -4,6 +4,18 @@ Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
 ## 2026-09-03
 
+- **Reports-tree watch + newest-per-symbol + PM decision persistence.**
+  - `signald/watch.py` `discover()`: watches the TradingAgents `reports/` tree
+    recursively for `research_decision.json` (run_card.json noise ignored),
+    keeps only the NEWEST decision per ticker by mtime (`latest_only`,
+    default on) — a symbol's older runs never emit. `.env` now points
+    `TRADINGEXEC_WATCH_DIR` at the reports tree.
+  - Research-side: `pm_decision` structured PortfolioDecision now persisted
+    into graph state + returned by the PM node (captured after the guardrail
+    hook), so `research_decision.json` carries real rating/data_quality/
+    guardrail_reason on new runs. Legacy artifacts (pre-fix, rating null)
+    correctly fail closed as invalid rather than being guessed. 4 watch
+    discovery tests; 68 hermetic total; ruff clean.
 - **Non-technical user guide** — `docs/USER_GUIDE.md`: plain-language
   explanation of what the system does (signals only, no orders), the safety
   mandate rules, how to read signal notifications (PASS/DOWNGRADE/BLOCK,

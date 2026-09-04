@@ -59,7 +59,9 @@ def test_run_once_execute_end_to_end(tmp_path, monkeypatch, capsys, seam):
     watch.mkdir()
     cfg_path.write_text("ALPACA_API_KEY=dummy\nALPACA_SECRET_KEY=dummy\n", encoding="utf-8")
     write_mandate(tmp_path / "mandate.json", DEFAULT_MANDATE)
-    (watch / "AVGO_decision.json").write_text(
+    from signald.watch import ARTIFACT_NAME
+
+    (watch / ARTIFACT_NAME).write_text(
         json.dumps(build_sample(), sort_keys=True), encoding="utf-8"
     )
 

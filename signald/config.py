@@ -52,6 +52,8 @@ class Config:
     pid_file: Path = Path("./signald.pid")
 
     poll_seconds: float = 10.0
+    watch_recursive: bool = True
+    latest_only: bool = True
     ingest_window_hours: float = 24.0
     cooldown_hours: float = 12.0
     min_cash_reserve_usd: float = 25000.0
