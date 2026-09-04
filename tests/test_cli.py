@@ -32,10 +32,18 @@ def test_sample_writes_valid_artifact(tmp_path):
     assert rd.ticker == "AVGO" and rd.action() == "REDUCE"
 
 
-def test_run_without_keys_refuses(tmp_path, capsys):
+def test_run_without_keys_refuses(tmp_path, capsys, monkeypatch):
+    from signald.mandate import DEFAULT_MANDATE, write_mandate
+
+    for k in ("TRADINGAGENTS_ALPACA_API_KEY_ID", "TRADINGAGENTS_ALPACA_API_SECRET",
+              "ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
     cfg_path = tmp_path / ".env"
+    write_mandate(tmp_path / "mandate.json", DEFAULT_MANDATE)
     rc = cli.main(["run", "--once", "--watch", str(tmp_path / "decisions"),
-                   "--data", str(tmp_path / "signals"), "--env", str(cfg_path)])
+                   "--data", str(tmp_path / "signals"), "--env", str(cfg_path),
+                   "--mandate", str(tmp_path / "mandate.json")])
     assert rc == 1
     assert "ALPACA_API_KEY" in capsys.readouterr().err
 

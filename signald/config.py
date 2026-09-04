@@ -20,8 +20,19 @@ from typing import Any
 ENV_FILE = "TRADINGEXEC_ENV_FILE"
 _PREFIX = "TRADINGEXEC_"
 _ALPACA_PREFIX = "ALPACA_"
+# TradingAgents research repo uses TRADINGAGENTS_ALPACA_* for the same keys.
+_TAGENT_ALPACA_PREFIX = "TRADINGAGENTS_ALPACA_"
+_PREFIXES = (_TAGENT_ALPACA_PREFIX, _PREFIX, _ALPACA_PREFIX)
 # env var name -> Config field name (only where they differ)
-_ALIASES = {"alpaca_api_key": "alpaca_key", "alpaca_secret_key": "alpaca_secret"}
+# mapping is applied to the env var AFTER the known prefix is stripped:
+# "ALPACA_API_KEY" -> "api_key", "TRADINGAGENTS_ALPACA_API_KEY_ID" -> "api_key_id"
+_ALIASES = {
+    "api_key": "alpaca_key",
+    "api_key_id": "alpaca_key",
+    "secret": "alpaca_secret",
+    "secret_key": "alpaca_secret",
+    "api_secret": "alpaca_secret",
+}
 
 
 def now_utc() -> datetime:
@@ -125,14 +136,15 @@ def load_config(
 
     # 2. real env overrides .env values
     for k, v in environ.items():
-        if k.startswith((_PREFIX, _ALPACA_PREFIX)):
+        if k.startswith(_PREFIXES):
             values[k] = v
 
     # 3. map flat keys onto dataclass fields
     field_names = {f.name for f in fields(Config)}
     mapped: dict[str, Any] = {}
     for k, v in values.items():
-        key = k.removeprefix(_PREFIX)
+        key = next((p for p in _PREFIXES if k.startswith(p)), k)
+        key = k[len(key):]
         key = key.lower()
         key = _ALIASES.get(key, key)
         if key not in field_names:

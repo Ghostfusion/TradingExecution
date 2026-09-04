@@ -132,14 +132,31 @@ class AlpacaReference:
                 q = data_client.get_stock_latest_quote(
                     StockLatestQuoteRequest(symbol_or_symbols=[ticker])
                 )
-                row = q.get(ticker, None)
+                row = q.get(ticker)
                 if row is None:
                     return {}
                 ts = getattr(row, "timestamp", None)
+                # alpaca-py Quote exposes flat bid_price/ask_price (not nested
+                # .bid/.ask). Fall back to nested objects for defensiveness.
+                bid_p = _num(getattr(row, "bid_price", None)) or _quote_price(
+                    getattr(row, "bid", None)
+                )
+                ask_p = _num(getattr(row, "ask_price", None)) or _quote_price(
+                    getattr(row, "ask", None)
+                )
+                last = None
+                if bid_p is not None and ask_p is not None:
+                    last = round((bid_p + ask_p) / 2.0, 4)  # mid
+                elif bid_p is not None:
+                    last = bid_p
+                elif ask_p is not None:
+                    last = ask_p
                 return {
-                    "last": _num(getattr(row, "bid", None) or getattr(row, "ask", None)),
+                    "last": last,
                     "vwap": None,
-                    "spread_usd": _spread(row),
+                    "spread_usd": (
+                        None if (bid_p is None or ask_p is None) else round(ask_p - bid_p, 4)
+                    ),
                     "ts": ts.isoformat() if ts else None,
                     "feed": "iex",
                 }
@@ -191,14 +208,12 @@ class AlpacaReference:
         )
 
 
-def _spread(row: Any) -> float | None:
-    bid = getattr(row, "bid", None)
-    ask = getattr(row, "ask", None)
-    if bid is None or ask is None:
+def _quote_price(q: Any) -> float | None:
+    if q is None:
         return None
     try:
-        return round(float(ask) - float(bid), 4)
-    except (TypeError, ValueError):
+        return float(q.price)
+    except (TypeError, ValueError, AttributeError):
         return None
 
 

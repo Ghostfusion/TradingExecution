@@ -7,7 +7,11 @@ from signald.config import load_config
 pytestmark = __import__("pytest").mark.timeout(120)
 
 
-def test_env_file_alias_mapping(tmp_path):
+def test_env_file_alias_mapping(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_ALPACA_API_KEY_ID", raising=False)
+    monkeypatch.delenv("TRADINGAGENTS_ALPACA_API_SECRET", raising=False)
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
     env = tmp_path / ".env"
     env.write_text(
         "ALPACA_API_KEY=key123\nALPACA_SECRET_KEY=sec456\nALPACA_PAPER=true\n",
@@ -17,6 +21,15 @@ def test_env_file_alias_mapping(tmp_path):
     assert cfg.alpaca_key == "key123"
     assert cfg.alpaca_secret == "sec456"
     assert cfg.alpaca_paper is True
+
+
+def test_tradingagents_alpaca_env_alias(tmp_path, monkeypatch):
+    # keys come from the research repo's .env: TRADINGAGENTS_ALPACA_API_KEY_ID / _SECRET
+    monkeypatch.setenv("TRADINGAGENTS_ALPACA_API_KEY_ID", "PKG4XXXX")
+    monkeypatch.setenv("TRADINGAGENTS_ALPACA_API_SECRET", "tcUqXXXX")
+    cfg = load_config(env_file=None, watch_dir=tmp_path / "w", data_dir=tmp_path / "s")
+    assert cfg.alpaca_key == "PKG4XXXX"
+    assert cfg.alpaca_secret == "tcUqXXXX"
 
 
 def test_none_overrides_skipped(tmp_path):

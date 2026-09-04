@@ -4,6 +4,14 @@ Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
 ## 2026-09-03
 
+- **Live Alpaca paper verification (real paper keys).** `TRADINGAGENTS_ALPACA_*`
+  env names now load (prefix + `api_key_id`/`api_secret` aliases); real
+  alpaca-py quote parsing fixed (flat `bid_price`/`ask_price` — markets closed
+  now, the snapshot legitimately returns last=None/spread=None/stale with
+  $100k cash/$400k buying power/AVGO tradable). End-to-end `signald run
+  --execute` emitted a real signal from the live paper reference (AVGO REDUCE,
+  verdict DOWNGRADE, config-hash + 1-row audit chain verified). Tests
+  environment-isolated from ambient env (monkeypatch.delenv).
 - **Phase A implemented — `signald` signal daemon (no order path).**
   - `config.py` env parsing (`.env` + `TRADINGEXEC_*`/`ALPACA_*`, alias
     mapping, config hash excludes secrets), `schema.py` (ResearchDecision
