@@ -59,9 +59,19 @@ class Notifier:
             return
         if not self.url:
             raise RuntimeError("no notifier URL configured")
+        body = payload
+        if "discord.com/api/webhooks" in self.url or "discordapp.com/api/webhooks" in self.url:
+            # Discord wants content/embeds; format the event for a readable card
+            event = json.loads(payload.decode("utf-8"))
+            body = json.dumps(self.discord_event(event)).encode("utf-8")
         req = urllib.request.Request(
-            self.url, data=payload, method="POST",
-            headers={"Content-Type": "application/json"},
+            self.url, data=body, method="POST",
+            headers={
+                "Content-Type": "application/json",
+                # Discord's Cloudflare edge rejects requests without a
+                # browser-like User-Agent (HTTP 403, error 1010).
+                "User-Agent": "tradingexec-signald/0.1 (+https://github.com/Ghostfusion/TradingExecution)",
+            },
         )
         with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
             resp.read()
@@ -69,6 +79,47 @@ class Notifier:
     def signal_event(self, envelope: dict[str, Any]) -> dict[str, Any]:
         return {"event": "signal", "ts": self._now().isoformat(timespec="seconds"),
                 "signal_id": envelope["signal_id"], "envelope": envelope}
+
+    def discord_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Map an event to a Slack/Discord-compatible content+embed payload.
+
+        Slack and Discord both accept ``{"content": ..., "embeds": [...]}``.
+        A signal renders: action emoji + ticker + action + price/verdict; all
+        other events render a plain line. Missing fields degrade gracefully
+        (never raises)."""
+        kind = event.get("event", "event")
+        if kind == "signal":
+            env = event.get("envelope", {})
+            g = env.get("gates", {})
+            action = env.get("action", "?")
+            emoji = {"BUY": "🟢", "REDUCE": "🔻", "EXIT": "⏹", "HOLD": "⏸"}.get(action, "🔔")
+            verdict = g.get("verdict", "?")
+            price = (env.get("ref") or {}).get("last")
+            band = env.get("expected_cost_band_bps")
+            line = (
+                f"{emoji} {env.get('ticker', '?')} **{action}** "
+                f"(verdict {verdict})"
+            )
+            if price is not None:
+                line += f" | ref {price}"
+            if band:
+                line += f" | cost {band[0]}-{band[1]}bps"
+            content = f"Signal {event.get('signal_id', '?')} {line}"
+            fields = []
+            for key, label in (("target_pct", "target %"), ("score", "score"),
+                               ("confidence", "confidence"), ("stop", "stop"),
+                               ("take_profit", "take profit"), ("expiry", "expiry")):
+                v = env.get(key)
+                if v is not None:
+                    fields.append({"name": label, "value": str(v), "inline": True})
+            return {
+                "content": content,
+                "embeds": [{"title": f"{env.get('ticker', '?')} signal",
+                            "description": env.get("decision_hash", ""),
+                            "fields": fields}],
+            }
+        detail = event.get("detail") or event.get("reason") or event.get("source") or ""
+        return {"content": f"{kind}: {detail}"}
 
     def error_event(self, source: str, detail: str) -> dict[str, Any]:
         return {"event": "error", "ts": self._now().isoformat(timespec="seconds"),

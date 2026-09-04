@@ -4,6 +4,14 @@ Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
 ## 2026-09-03
 
+- **Discord notifier live.** Signals render as readable Discord content+embeds
+  (action emoji, ticker, verdict, ref price, expected-cost band, stop/target)
+  instead of raw JSON; `discordapp.com` legacy domain matched; browser-like
+  User-Agent sent so Discord's Cloudflare edge accepts the POST (403/1010
+  without it). Live-verified with `signald notify-test` + a real signal
+  dispatch. Webhook URL lives in gitignored `.env`
+  (`TRADINGEXEC_NOTIFIER_URL`); `.env.example` documents setup. 64 hermetic
+  tests; ruff clean.
 - **Watchdog + notifier wiring + web signal feed.**
   - `signald/watchdog.py` + CLI `watchdog` — heartbeat freshness check,
     dispatches `heartbeat_loss` notifier event + non-zero exit when stale
