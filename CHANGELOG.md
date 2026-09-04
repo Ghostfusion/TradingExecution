@@ -4,6 +4,11 @@ Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
 ## 2026-09-03
 
+- **Non-technical user guide** — `docs/USER_GUIDE.md`: plain-language
+  explanation of what the system does (signals only, no orders), the safety
+  mandate rules, how to read signal notifications (PASS/DOWNGRADE/BLOCK,
+  cost band, stale-data flags), the web dashboard panel, what is NOT built
+  yet, the kill switch, and an FAQ. README links it.
 - **Discord notifier live.** Signals render as readable Discord content+embeds
   (action emoji, ticker, verdict, ref price, expected-cost band, stop/target)
   instead of raw JSON; `discordapp.com` legacy domain matched; browser-like

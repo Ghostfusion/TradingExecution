@@ -81,3 +81,5 @@ Parent workspace:
   `TRADINGEXEC_*` settings; mirror keys in `.env.example`.
 - Conventions: ruff (E/W/F/I/B/UP/C4/SIM), line length 100; every test carries
   a pytest-timeout deadline. See `docs/AGENT_ONBOARDING.md` — read it first.
+- **Non-technical guide**: `docs/USER_GUIDE.md` — what the system does, how to
+  read signals, safety rules, FAQ (no code knowledge needed).
