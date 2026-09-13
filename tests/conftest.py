@@ -6,7 +6,7 @@ full pipeline runs with ZERO network access.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,11 @@ from signald.notifier import Notifier
 from signald.processor import SignalProcessor
 from signald.stores import AuditChain, Journal, SignalStore
 
-NOW = datetime(2026, 9, 3, 12, 0)
+# The injected clock is "today at noon": `build_sample()` stamps `date.today()`
+# as the effective date, so a fixed past date here made every processor test
+# fail the no-lookahead precheck as soon as the wall clock moved past it. The
+# date is derived once at import - no test reads the clock by itself.
+NOW = datetime.combine(date.today(), time(12, 0))
 
 pytestmark = pytest.mark.timeout(120)
 

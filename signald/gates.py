@@ -1,28 +1,42 @@
-"""Fail-closed mandate gates (plan §4.4).
+"""Signal-stage facade over the house risk gate (plan §4, C7).
 
-Every gate must run; a gate that cannot evaluate (missing reference data,
-missing journal state) FAILS the signal — never a silent pass. Output is a
-verdict: PASS | DOWNGRADE (signal emitted with reasons) | BLOCK (no signal).
-HALT (kill switch) is checked before gates in the processor.
+Phase A judged a *signal*: PASS / DOWNGRADE (emit with reasons) / BLOCK. That
+verdict is now produced by one implementation, :mod:`signald.risk.gate`, and
+this module only translates the signal-stage inputs (`ResearchDecision`,
+`SignalContract`, `RefData`, journal state) into a `GateContext` and the
+decision back into a `GateResult`. It owns no rule of its own - if a rule is
+not in `risk/gate.py`, it does not exist.
 
-Gates are pure functions of (decision, contract, mandate, ref, journal_state).
+The two stages differ in exactly two places, both documented in the gate:
+
+* a **soft** failure (missing/partial data, a closed market, a missing stop)
+  downgrades a signal instead of refusing it - a signal is a recorded
+  recommendation for the next session, an order is not;
+* the checks that need a **quantity or a measured move** (participation,
+  cluster stress, cost gate, concentration) are order-stage only: a signal has
+  no size yet, and its notional exposure is capped by the mandate here.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from .alpaca_ref import RefData
+from .config import Config
+from .contracts import GATE_PRECEDENCE
 from .mandate import Mandate
+from .risk.gate import GateContext, GateDecision
+from .risk.gate import evaluate as evaluate_house_gate
+from .risk.ladder import LadderState
+from .risk.state import SWING, BookState, MarketState, RiskRequest
+from .risk.tail import ESResult
+from .risk.voltarget import VolScalar
 from .schema import ResearchDecision, SignalContract
 
-_STOP_BREACH_RE = re.compile(
-    r"price_stop_loss:\s*breach\s*(?:below|above)?\s*([0-9]+(?:\.[0-9]+)?)",
-    re.IGNORECASE,
-)
+#: Phase A's verdict vocabulary, kept for existing consumers (envelope shape).
+_VERDICT = {"ALLOW": "PASS", "REDUCE": "DOWNGRADE", "BLOCK": "BLOCK"}
 
 
 @dataclass(frozen=True)
@@ -33,14 +47,140 @@ class GateResult:
     blocked: tuple[str, ...] = ()
     approval_required: bool = False
     target_notional_usd: float | None = None
+    #: The v2 fields (additive): the gate's own vocabulary and binding check.
+    trade_permission: str = "ALLOW"
+    binding_gate: str | None = None
+    adjusted_risk_pct: float | None = None
+    permission_reason_code: str = "ok"
+    state_snapshot: dict[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
         return self.verdict in {"PASS", "DOWNGRADE"}
 
 
-def _notional(contract: SignalContract) -> float | None:
-    return contract.target_notional_usd
+def _spread_bps(ref: RefData) -> float | None:
+    if ref.spread_usd is None or not ref.last:
+        return None
+    return (ref.spread_usd / 2.0) / ref.last * 1e4
+
+
+def _quote_age_s(ref: RefData, now: datetime) -> float | None:
+    if ref.ts is None:
+        return None
+    stamp = ref.ts.replace(tzinfo=None) if ref.ts.tzinfo is not None else ref.ts
+    return max(0.0, (now - stamp).total_seconds())
+
+
+def _request(contract: SignalContract, ref: RefData, sleeve: str = SWING) -> RiskRequest:
+    stop = contract.stop_price
+    stop_distance = 0.0
+    if stop is not None and ref.last is not None:
+        stop_distance = abs(ref.last - stop)
+    side = "sell" if contract.action in {"REDUCE", "EXIT"} else "buy"
+    return RiskRequest(
+        sleeve=sleeve,
+        symbol=contract.symbol,
+        setup=str(contract.strategy or "VALUE_DIP"),
+        side=side,
+        stop_distance=stop_distance,
+        price=float(ref.last or 0.0),
+        equity=float(ref.equity or 0.0),
+        requested_risk_pct=float(contract.target_pct or 0.0),
+        stop_price=stop,
+        target_price=contract.target_price,
+        planned_notional_usd=contract.target_notional_usd,
+        intent_id=contract.decision_hash,
+    )
+
+
+def build_context(
+    rd: ResearchDecision,
+    contract: SignalContract,
+    mandate: Mandate,
+    ref: RefData,
+    journal_state: dict[str, Any],
+    now: datetime,
+    config: Config,
+) -> GateContext:
+    """Translate the Phase-A inputs into the gate's typed context."""
+    request = _request(contract, ref)
+    equity = float(ref.equity or 0.0)
+    cash = float(ref.cash or 0.0)
+    ingest_hours = float(journal_state.get("ingest_window_hours", 24.0) or 24.0)
+    signals_today = int(journal_state.get("signals_today", 0) or 0)
+    book = BookState(
+        equity=equity,
+        cash=cash,
+        heat_pct=0.0,
+        es_pct=0.0,
+        sleeve_trades_today={request.sleeve: signals_today},
+        trades_today={},
+    )
+    market = MarketState(
+        symbol=contract.symbol,
+        last=ref.last,
+        spread_bps=_spread_bps(ref),
+        spread_median_bps=None,
+        quote_age_s=_quote_age_s(ref, now),
+        bar_age_s=None,
+        feed=str(ref.feed or "sip"),
+        as_of=ref.ts,
+        session="rth" if ref.market_open is not False else "closed",
+        tradable=ref.asset_tradable if ref.asset_tradable is not None else True,
+        shortable=False,
+        adv_shares=None,
+        atr=None,
+        data_quality=rd.data_quality,
+        price_caliber=rd.price_caliber,
+    )
+    return GateContext(
+        request=request,
+        book=book,
+        market=market,
+        mandate=mandate,
+        config=config,
+        now=now,
+        ladder=LadderState(
+            rung=0,
+            size_multiplier=1.0,
+            allow_new_intraday=True,
+            flatten_intraday=False,
+            freeze_allocation=False,
+            halt=False,
+            reason="none",
+        ),
+        vol=VolScalar(
+            scalar=1.0,
+            target=0.10,
+            realized=0.10,
+            warmup_ok=False,
+            applied=False,
+            reason="warmup",
+        ),
+        es=ESResult(
+            value_pct=0.0,
+            estimator="unavailable",
+            flagged=True,
+            window_days=0,
+            components={},
+        ),
+        sleeve_ceiling_pct=1.0,
+        sleeve_deployed_pct=0.0,
+        stage="signal",
+        reference_complete=ref.complete_for_gates,
+        reference_stale=bool(ref.stale),
+        reference_ts=None if ref.ts is None else str(ref.ts),
+        market_open=ref.market_open,
+        positions_value_usd=ref.positions_value,
+        decision_age_days=(now.date() - rd.effective_date).days,
+        ingest_window_days=ingest_hours / 24.0,
+        live_invalidations=tuple(rd.invalidations),
+        last_signal=journal_state.get("last_signal"),
+        cooldown_hours=float(journal_state.get("cooldown_hours", 12.0) or 12.0),
+        action=contract.action,
+        research_risk_context=dict(rd.risk_context),
+    )
 
 
 def evaluate(
@@ -50,163 +190,39 @@ def evaluate(
     ref: RefData,
     journal_state: dict[str, Any],
     now: datetime,
+    config: Config | None = None,
 ) -> GateResult:
-    downgrades: list[str] = []
-    blocked: list[str] = []
-    reasons: list[str] = []
+    """Phase-A verdict from the single producer (see module docstring)."""
+    cfg = config if config is not None else Config()
+    ctx = build_context(rd, contract, mandate, ref, journal_state, now, cfg)
+    return to_gate_result(evaluate_house_gate(ctx), contract)
 
-    def block(reason: str) -> None:
-        blocked.append(reason)
-        reasons.append(f"BLOCK {reason}")
 
-    def downgrade(reason: str) -> None:
-        downgrades.append(reason)
-        reasons.append(f"DOWNGRADE {reason}")
-
-    # --- instrument + direction (mandate) ---
-    if contract.symbol not in mandate.allowed:
-        block(f"symbol {contract.symbol} not in mandate allowed set")
-    if contract.implies_short and not mandate.shorts:
-        block("short intent rejected: mandate shorts=false")
-
-    # --- size (cap, downgrade not block) ---
-    notional = _notional(contract)
-    if notional is not None and notional > mandate.max_notional_per_order_usd:
-        downgrade(
-            f"target notional {notional:,.0f} > cap {mandate.max_notional_per_order_usd:,.0f}"
-        )
-
-    # --- reference completeness (fail closed) ---
-    if not ref.complete_for_gates:
-        block("reference data incomplete (cash/asset state unavailable) — fail closed")
-    if ref.stale:
-        downgrade(f"reference quote stale (ts={ref.ts}) — treat price fields as questionable")
-
-    # --- exposure (from positions + this order) ---
-    if ref.positions_value is not None and notional is not None:
-        total = ref.positions_value + notional
-        if total > mandate.max_total_exposure_usd:
-            downgrade(
-                f"projected exposure {total:,.0f} > {mandate.max_total_exposure_usd:,.0f}"
-            )
-
-    # --- cash reserve (hard) ---
-    if ref.cash is not None and ref.cash < mandate.min_cash_reserve_usd:
-        block(f"cash {ref.cash:,.0f} < reserve {mandate.min_cash_reserve_usd:,.0f}")
-
-    # --- tradeability ---
-    if ref.asset_tradable is False:
-        block(f"{contract.symbol} not tradable (Alpaca asset flag)")
-    elif ref.market_open is False:
-        downgrade("market closed — next-session signal")
-
-    # --- daily count ---
-    daily = int(journal_state.get("signals_today", 0))
-    if mandate.max_daily_trades > 0 and daily >= mandate.max_daily_trades:
-        block(f"daily signal cap reached ({daily} >= {mandate.max_daily_trades})")
-
-    # --- cooldown (same ticker, same action) ---
-    last = journal_state.get("last_signal")
-    if last:
-        last_ts = _parse_iso(last.get("emitted_at"))
-        if (
-            last_ts
-            and last.get("ticker") == contract.symbol
-            and last.get("action") == contract.action
-        ):
-            gap_h = (now - last_ts).total_seconds() / 3600.0
-            if gap_h < 0:  # clock skew guard is elsewhere; here just compute
-                gap_h = 0.0
-            if gap_h < _cooldown_hours(journal_state):
-                downgrade(
-                    f"cooldown: same {contract.action} signal for {contract.symbol} "
-                    f"{gap_h:.1f}h ago"
-                )
-
-    # --- data quality (fail closed on degraded data) ---
-    if rd.data_quality in {"stale", "unknown"}:
-        block(f"data_quality={rd.data_quality} — research decision not trustworthy")
-    elif rd.data_quality == "partial":
-        downgrade("data_quality=partial — treat decision as weaker")
-
-    # --- price caliber ---
-    caliber = (rd.price_caliber or "").strip().lower()
-    if not caliber or caliber in {"unknown", "mixed", "unresolved", "n/a", "none"}:
-        downgrade(f"price_caliber={caliber or 'unset'} — price sanity not computed")
-
-    # --- invalidation ---
-    for inv in rd.invalidations:
-        m = _STOP_BREACH_RE.search(inv)
-        if m and ref.last is not None:
-            try:
-                level = float(m.group(1))
-            except ValueError:
-                level = float("inf")
-            if ref.last <= level:
-                block(f"invalidation live: {inv} (last {ref.last} <= {level})")
-                break
-        else:
-            downgrade(f"invalidation present: {inv}")
-
-    # --- staleness (ingest window) ---
-    window = _ingest_window(journal_state)
-    if (now.date() - rd.effective_date).days > window:
-        block(f"decision older than ingest window ({window}d)")
-
-    # --- approval mode ---
-    approval_required = False
-    if (
-        notional is not None
-        and mandate.approval_mode in {"manual-high-order", "approval"}
-        and notional >= mandate.max_notional_per_order_usd * _approval_factor(journal_state)
-    ):
-        approval_required = True
-        downgrade("size >= approval threshold — approval required before any execution")
-
-    if blocked:
-        return GateResult(
-            verdict="BLOCK",
-            reasons=tuple(reasons),
-            downgrades=tuple(downgrades),
-            blocked=tuple(blocked),
-            approval_required=approval_required,
-            target_notional_usd=notional,
-        )
-    if downgrades:
-        return GateResult(
-            verdict="DOWNGRADE",
-            reasons=tuple(reasons),
-            downgrades=tuple(downgrades),
-            blocked=(),
-            approval_required=approval_required,
-            target_notional_usd=notional,
-        )
+def to_gate_result(decision: GateDecision, contract: SignalContract) -> GateResult:
+    blocked = tuple(f.reason for f in decision.failures if f.kind == "block")
+    downgrades = tuple(f.reason for f in decision.failures if f.kind == "reduce")
+    reasons = tuple(
+        f"{'BLOCK' if f.kind == 'block' else 'DOWNGRADE'} {f.reason}" for f in decision.failures
+    ) or ("all gates passed",)
     return GateResult(
-        verdict="PASS",
-        reasons=("all gates passed",),
-        target_notional_usd=notional,
+        verdict=_VERDICT[decision.verdict],
+        reasons=reasons,
+        downgrades=downgrades,
+        blocked=blocked,
+        approval_required=decision.approval_required,
+        target_notional_usd=contract.target_notional_usd,
+        trade_permission=decision.verdict,
+        binding_gate=decision.binding_gate,
+        adjusted_risk_pct=decision.adjusted_risk_pct,
+        permission_reason_code=decision.permission_reason_code,
+        state_snapshot=decision.state_snapshot,
     )
 
 
-def _parse_iso(v: Any) -> datetime | None:
-    if not v:
-        return None
-    try:
-        s = str(v)
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s)
-    except ValueError:
-        return None
-
-
-def _cooldown_hours(state: dict[str, Any]) -> float:
-    return float(state.get("cooldown_hours", 12.0))
-
-
-def _ingest_window(state: dict[str, Any]) -> float:
-    return float(state.get("ingest_window_hours", 24.0) / 24.0)
-
-
-def _approval_factor(state: dict[str, Any]) -> float:
-    return float(state.get("approval_threshold_factor", 1.0))
+__all__ = [
+    "GATE_PRECEDENCE",
+    "GateResult",
+    "build_context",
+    "evaluate",
+    "to_gate_result",
+]

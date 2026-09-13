@@ -60,7 +60,7 @@ class ResearchDecision:
     rating: str | None
     direction: str | None
     data_quality: str
-    schema_version: int = 1
+    schema_version: str = "1.0.0"
     thesis: str | None = None
     rationale: str | None = None
     recommended_allocation_pct: float | None = None
@@ -76,6 +76,21 @@ class ResearchDecision:
     disclosure: dict[str, Any] = field(default_factory=dict)
     decision_hash: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # --- v1.1 producer contract (additive; empty on a Phase-A artifact) ---
+    opportunity_score: float | None = None
+    expires_at: datetime | None = None
+    produced_at: datetime | None = None
+    idempotency_key: str | None = None
+    producer: dict[str, Any] = field(default_factory=dict)
+    artifact_sha256: str | None = None
+    risk_context: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def major(self) -> int:
+        """Declared MAJOR version (the boundary already rejected unknown ones)."""
+        from .contracts import parse_semver  # local import: contracts imports this module
+
+        return parse_semver(self.schema_version)[0]
 
     def action(self) -> str:
         """Normalised action; raises ContractError when unresolvable."""
@@ -100,6 +115,19 @@ def _coerce_float(v: Any, name: str) -> float | None:
         return float(v)
     except (TypeError, ValueError) as exc:
         raise ContractError(f"field {name} is not a number: {v!r}") from exc
+
+
+def _coerce_ts(v: Any, name: str) -> datetime | None:
+    """ISO-8601 -> datetime (naive or aware as produced); blank/None -> None."""
+    if v is None or not str(v).strip():
+        return None
+    text = str(v).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ContractError(f"field {name} is not an ISO timestamp: {v!r}") from exc
 
 
 def parse_research_decision(raw: dict[str, Any]) -> ResearchDecision:
@@ -139,6 +167,10 @@ def parse_research_decision(raw: dict[str, Any]) -> ResearchDecision:
     rg_verdict = str(rg.get("verdict") or "").strip() or None if isinstance(rg, dict) else None
     rg_reasons = list(rg.get("reasons") or []) if isinstance(rg, dict) else []
 
+    rc = raw.get("risk_context") or {}
+    if not isinstance(rc, dict):
+        raise ContractError("risk_context must be an object")
+
     body = json.loads(json.dumps(raw, sort_keys=True, default=str))
     body.pop("decision_hash", None)
     computed_hash = sha256_of(body)
@@ -153,7 +185,9 @@ def parse_research_decision(raw: dict[str, Any]) -> ResearchDecision:
         "schema_version", "ticker", "effective_date", "rating", "direction",
         "thesis", "rationale", "recommended_allocation_pct", "position",
         "data_quality", "price_caliber", "invalidations", "guardrail_reason",
-        "risk_gate", "disclosure", "decision_hash",
+        "risk_gate", "disclosure", "decision_hash", "opportunity_score",
+        "expires_at", "produced_at", "idempotency_key", "producer",
+        "artifact_sha256", "risk_context",
     }}
 
     rd = ResearchDecision(
@@ -162,7 +196,7 @@ def parse_research_decision(raw: dict[str, Any]) -> ResearchDecision:
         rating=rating,
         direction=direction,
         data_quality=dq,
-        schema_version=int(raw.get("schema_version", 1)),
+        schema_version=str(raw.get("schema_version") or "1.0.0"),
         thesis=str(raw.get("thesis") or "") or None,
         rationale=str(raw.get("rationale") or "") or None,
         recommended_allocation_pct=_coerce_float(
@@ -180,6 +214,13 @@ def parse_research_decision(raw: dict[str, Any]) -> ResearchDecision:
         disclosure=dict(raw.get("disclosure") or {}),
         decision_hash=computed_hash,
         extra=extra,
+        opportunity_score=_coerce_float(raw.get("opportunity_score"), "opportunity_score"),
+        expires_at=_coerce_ts(raw.get("expires_at"), "expires_at"),
+        produced_at=_coerce_ts(raw.get("produced_at"), "produced_at"),
+        idempotency_key=str(raw.get("idempotency_key") or "") or None,
+        producer=dict(raw.get("producer") or {}),
+        artifact_sha256=str(raw.get("artifact_sha256") or "") or None,
+        risk_context=dict(rc),
     )
     rd.action()  # resolve now so a later gate never surprises
     return rd
@@ -203,6 +244,20 @@ class SignalContract:
     max_position_pct: float | None = None
     strategy: str | None = None
     reason: str | None = None
+    # --- v2 envelope fields (plan §2.3) ---------------------------------
+    sleeve: str | None = None
+    opportunity_score: float | None = None
+    trade_permission: str | None = None
+    binding_gate: str | None = None
+    permission_reason_code: str | None = None
+    permission_reason: str | None = None
+    valid_until: str | None = None
+    stop_kind: str | None = None
+    idempotency_key: str | None = None
+    data_vintage: str | None = None
+    cost_gate: dict[str, Any] = field(default_factory=dict)
+    day_type: dict[str, Any] = field(default_factory=dict)
+    time_gate: dict[str, Any] = field(default_factory=dict)
 
     @property
     def implies_short(self) -> bool:
@@ -249,4 +304,8 @@ def build_signal_contract(
         expiry=expiry,
         decision_hash=rd.decision_hash or "",
         timestamp=now.isoformat(timespec="seconds"),
+        opportunity_score=rd.opportunity_score,
+        idempotency_key=rd.idempotency_key,
+        # sleeve + trade_permission + binding_gate are router/gate-owned and are
+        # filled by the processor - never by the producer (design §4.3).
     )

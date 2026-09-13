@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
 
@@ -13,12 +13,12 @@ from signald.schema import build_signal_contract, parse_research_decision, sha25
 
 pytestmark = pytest.mark.timeout(120)
 
-NOW = datetime(2026, 9, 3, 12, 0)
+NOW = datetime.combine(date.today(), time(12, 0))
 
 
 def _doc(**kw):
     d = build_sample(**kw)
-    d["effective_date"] = "2026-09-03"
+    d["effective_date"] = NOW.date().isoformat()
     if "invalidations" not in kw:
         d["invalidations"] = []
     return _rehash(d)
@@ -175,7 +175,7 @@ def test_invalidation_breach_blocks(mandate):
 
 def test_old_decision_blocks(mandate):
     doc = _doc()
-    doc["effective_date"] = (date.today() - timedelta(days=3)).isoformat()
+    doc["effective_date"] = (NOW.date() - timedelta(days=3)).isoformat()
     rd, contract, state = _components(mandate, _rehash(doc))
     g = evaluate(rd, contract, mandate, _ref(), state, NOW)
     assert g.verdict == "BLOCK"

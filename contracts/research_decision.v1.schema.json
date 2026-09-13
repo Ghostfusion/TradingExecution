@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradingexecution.local/contracts/research_decision.v1.schema.json",
+  "title": "ResearchDecision v1 (producer contract)",
+  "description": "The artifact the research layer drops at the boundary. Mirrors signald/contracts.py::validate_envelope and signald/schema.py::parse_research_decision. Unknown fields are ignored (additionalProperties: true); the stricter 1.1.0 fields are declared under x-required-when.",
+  "type": "object",
+  "required": ["ticker", "effective_date"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "MAJOR.MINOR.PATCH; an unknown MAJOR is rejected at ingest. Legacy artifacts may omit it (treated as 1.0.0)."
+    },
+    "ticker": {"type": "string", "minLength": 1},
+    "effective_date": {"type": "string", "format": "date"},
+    "rating": {"type": ["string", "null"]},
+    "direction": {
+      "type": ["string", "null"],
+      "enum": [null, "add", "buy", "exit", "hold", "none", "reduce", "sell"],
+      "description": "Closed enum (signald.schema.VALID_DIRECTIONS); null allowed when rating resolves the action."
+    },
+    "action": {
+      "type": ["string", "null"],
+      "enum": [null, "BUY", "HOLD", "REDUCE", "EXIT", "NONE"]
+    },
+    "opportunity_score": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Producer-owned 0-100 scale (orthogonal to trade_permission)."
+    },
+    "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "thesis": {"type": ["string", "null"]},
+    "rationale": {"type": ["string", "null"]},
+    "recommended_allocation_pct": {"type": ["number", "null"]},
+    "position": {
+      "type": ["object", "null"],
+      "properties": {
+        "target_notional": {"type": ["number", "null"]},
+        "stop_loss": {"type": ["number", "null"]},
+        "take_profit": {"type": ["number", "null"]},
+        "size_pct_book": {"type": ["number", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "data_quality": {
+      "type": "string",
+      "enum": ["fresh", "partial", "stale", "unknown"],
+      "description": "Closed enum (signald.schema.VALID_DATA_QUALITY)."
+    },
+    "price_caliber": {"type": ["string", "null"]},
+    "invalidations": {"type": "array", "items": {"type": "string"}},
+    "guardrail_reason": {"type": ["string", "null"]},
+    "risk_context": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "Advisory only; may never set trade_permission."
+    },
+    "risk_gate": {"type": ["object", "null"], "additionalProperties": true},
+    "disclosure": {"type": ["object", "null"], "additionalProperties": true},
+    "expires_at": {"type": ["string", "null"], "format": "date-time"},
+    "produced_at": {"type": ["string", "null"], "format": "date-time"},
+    "idempotency_key": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "producer": {
+      "type": ["object", "null"],
+      "required": ["service"],
+      "properties": {
+        "service": {"type": "string", "minLength": 1},
+        "git_sha": {"type": "string"},
+        "run_id": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "artifact_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 over the artifact body (all keys but artifact_sha256 and decision_hash)."
+    },
+    "decision_hash": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "additionalProperties": true,
+  "x-required-when": {
+    "schema_version>=1.1.0": ["expires_at", "idempotency_key", "producer", "artifact_sha256"]
+  }
+}

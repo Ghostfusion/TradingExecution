@@ -12,16 +12,25 @@ order without a mandate; research is advisory, execution is committed.
 
 ## Status
 
-- **Phase A implemented (52 hermetic tests green, ruff clean, commit
-  `…PhaseA`):** `signald` daemon — watches `decisions/`, validates +
-  hash-verifies `research_decision.json` (emitted by TradingAgents ≥
-  `48912e7`), normalizes to a Signal Contract, runs all mandate gates
-  fail-closed, enriches with Alpaca paper reference + expected-cost band,
-  emits signal envelopes (jsonl/latest/terminal/notifier), and journals
-  everything into a SHA-256-chained audit ledger with a kill switch + PID
-  lock + heartbeat. **No order submission path exists.**
+- **P0–P6 of the two-sleeve build implemented (1033 hermetic tests green, ruff
+  clean):** on top of the Phase-A signal daemon — the versioned boundary
+  (contracts + inbox + dead-letter), the sleeve router and budgets, the 16-check
+  house risk gate with precedence and `binding_gate`, one sizer, the full paper
+  order path (policy → guard → manager → state → synthetic stops → halts →
+  flatten → reconcile), the intraday sleeve (calendar/clock, market-data service,
+  day-type classifier, five setups, cost gate), the validation harness and
+  lineage, the signed control API and the MCP surface, plus a runbook and a
+  promotion checklist.
+- **Every phase ships off by default.** Default `TRADINGEXEC_MODE=signal` has no
+  order path at all; paper/live additionally require `execute=True`. The live
+  broker/market-data adapters are not written yet (P5 deployment work) — the
+  session engine takes injected seams. Nothing was enabled by this change.
 - Design contract: [`../EXECUTION_IMPLEMENTATION_PLAN.md`](../EXECUTION_IMPLEMENTATION_PLAN.md)
   (TradingNew level) built on [`../Master_deign.md`](../Master_deign.md).
+- **Two-sleeve algo intraday design** (value-dip swing + day-trade sleeve under one house risk gate, research↔execution
+  separation, `opportunity_score` vs `trade_permission`): [`docs/INTRADAY_ALGO_DESIGN.md`](docs/INTRADAY_ALGO_DESIGN.md)
+  with the build plan in [`docs/INTRADAY_ALGO_IMPLEMENTATION.md`](docs/INTRADAY_ALGO_IMPLEMENTATION.md).
+  Both are design/plan only — they change no behaviour and enable nothing.
 
 ## Usage (Phase A)
 
@@ -64,10 +73,17 @@ The research/analysis layer never knows which mode is active.
 ```
 TradingExecution/
 ├── README.md  CHANGELOG.md  docs/AGENT_ONBOARDING.md
-├── signald/        (Phase A: watch, normalizer, gates, envelope, channels,
-│                    audit, journal, notifier, Alpaca reference client)
-├── tests/          (hermetic — injected transport seam, zero network)
-└── .github/        (CI)
+├── contracts/      (published JSON Schemas: research_decision.v1, signal.v2,
+│                    order_intent.v1 — the boundary is typed data)
+├── signald/        (watch · normalizer · processor · one house risk gate ·
+│                    sleeves · marketdata · signals · order path · engine ·
+│                    reconcile · lineage · api · mcp · promotion · CLI)
+│                    risk/ tail · voltarget · ladder · sizing · gate (precedence)
+│                    order/ prices · policy · guard · manager · state · stops ·
+│                    halts · flatten
+│                    validation/ stats (DSR/PBO/bootstrap) · harness (replay)
+├── tests/          (hermetic — injected seams, injected clock, zero network)
+└── .github/        (CI: test + independence jobs)
 ```
 
 Parent workspace:

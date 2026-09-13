@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradingexecution.local/contracts/signal.v2.schema.json",
+  "title": "Signal v2 (execution envelope)",
+  "description": "The envelope signald emits (plan 0.1 + 2.3). The Phase-A keys are required; every v2 addition is optional so a Phase-A consumer stays valid. Unknown fields are ignored.",
+  "type": "object",
+  "required": [
+    "signal_id",
+    "decision_hash",
+    "ticker",
+    "action",
+    "target_pct",
+    "score",
+    "confidence",
+    "stop",
+    "take_profit",
+    "expiry",
+    "ref",
+    "expected_cost_band_bps",
+    "gates",
+    "approval",
+    "emitted_at",
+    "config_hash",
+    "commit"
+  ],
+  "properties": {
+    "signal_id": {"type": "string"},
+    "decision_hash": {"type": "string"},
+    "ticker": {"type": "string"},
+    "action": {
+      "type": "string",
+      "enum": ["BUY", "HOLD", "REDUCE", "EXIT", "NONE"]
+    },
+    "target_pct": {"type": "number"},
+    "score": {"type": ["number", "null"]},
+    "confidence": {"type": ["number", "null"]},
+    "stop": {"type": ["number", "null"]},
+    "take_profit": {"type": ["number", "null"]},
+    "expiry": {"type": "string"},
+    "ref": {"type": ["object", "null"], "additionalProperties": true},
+    "expected_cost_band_bps": {"type": "array", "items": {"type": "integer"}},
+    "gates": {
+      "type": "object",
+      "properties": {
+        "verdict": {"type": "string"},
+        "downgrades": {"type": "array", "items": {"type": "string"}},
+        "blocked": {"type": "array", "items": {"type": "string"}},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "target_notional_usd": {"type": ["number", "null"]},
+        "approval_required": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    },
+    "approval": {
+      "type": "object",
+      "properties": {"state": {"type": "string"}},
+      "additionalProperties": true
+    },
+    "emitted_at": {"type": "string", "format": "date-time"},
+    "config_hash": {"type": "string"},
+    "commit": {"type": "string"},
+
+    "sleeve": {
+      "type": ["string", "null"],
+      "enum": [null, "swing", "intraday"],
+      "description": "Set by the router, never by the producer (plan 2.3)."
+    },
+    "opportunity_score": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+    "trade_permission": {
+      "type": ["string", "null"],
+      "enum": [null, "ALLOW", "REDUCE", "BLOCK"],
+      "description": "Gate-owned (plan 2.3)."
+    },
+    "binding_gate": {
+      "type": ["string", "null"],
+      "enum": [null, "mandate", "sleeve_capital", "house_drawdown", "house_cvar", "correlation_stress", "vol_regime", "market_regime", "knife_guard", "concentration", "liquidity", "cost", "wash", "shortability", "data", "time", "halt", "approval"],
+      "description": "Most-binding gate name; the vocabulary is signald.contracts.GATE_PRECEDENCE."
+    },
+    "permission_reason_code": {"type": ["string", "null"]},
+    "permission_reason": {"type": ["string", "null"]},
+    "cost_gate": {"type": ["object", "null"], "additionalProperties": true},
+    "day_type": {"type": ["object", "null"], "additionalProperties": true},
+    "time_gate": {"type": ["object", "null"], "additionalProperties": true},
+    "valid_until": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "Supersedes the static expiry for intraday (plan 2.3)."
+    },
+    "stop_kind": {
+      "type": ["string", "null"],
+      "enum": [null, "native", "synthetic_stop_limit"]
+    },
+    "idempotency_key": {"type": ["string", "null"]},
+    "data_vintage": {"type": ["string", "null"]}
+  },
+  "additionalProperties": true
+}

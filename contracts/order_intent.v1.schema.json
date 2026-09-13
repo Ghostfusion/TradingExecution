@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradingexecution.local/contracts/order_intent.v1.schema.json",
+  "title": "OrderIntent v1 (internal, paper/live only)",
+  "description": "Internal order contract. Unknown keys are a bug (additionalProperties: false). Entries are limit/marketable-limit, never market (plan 4.4), so 'market' is deliberately absent from order_type.",
+  "type": "object",
+  "required": [
+    "intent_id",
+    "sleeve",
+    "symbol",
+    "side",
+    "qty",
+    "order_type",
+    "tif",
+    "client_order_id",
+    "created_at"
+  ],
+  "properties": {
+    "intent_id": {"type": "string"},
+    "sleeve": {"type": "string", "enum": ["swing", "intraday"]},
+    "symbol": {"type": "string"},
+    "side": {"type": "string", "enum": ["buy", "sell"]},
+    "qty": {"type": "integer", "minimum": 1},
+    "order_type": {
+      "type": "string",
+      "enum": ["limit", "marketable_limit", "stop", "stop_limit"],
+      "description": "Never 'market': entries are limit or marketable-limit (plan 4.4)."
+    },
+    "limit_price": {"type": ["number", "null"]},
+    "stop_price": {"type": ["number", "null"]},
+    "tif": {"type": "string", "enum": ["day", "gtc", "ioc", "fok", "opg", "cls"]},
+    "client_order_id": {"type": "string", "maxLength": 48},
+    "parent_proposal_id": {"type": ["string", "null"]},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

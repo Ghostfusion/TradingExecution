@@ -16,10 +16,12 @@ from typing import Any
 from .alpaca_ref import AlpacaReference, RefData, ReferenceUnavailable
 from .config import Config
 from .gates import GateResult, evaluate
+from .inbox import Inbox
 from .kill_switch import ensure_episode, is_halted, read_episode
 from .mandate import Mandate
 from .notifier import Notifier
 from .schema import ContractError, build_signal_contract, parse_research_decision
+from .sleeves.router import RouteError, route_research
 from .stores import AuditChain, Journal, SignalStore
 
 
@@ -40,6 +42,7 @@ class SignalProcessor:
         audit: AuditChain,
         reference: AlpacaReference,
         notifier: Notifier,
+        inbox: Inbox | None = None,
     ) -> None:
         self.cfg = config
         self.mandate = mandate
@@ -48,6 +51,7 @@ class SignalProcessor:
         self.audit = audit
         self.ref = reference
         self.notifier = notifier
+        self.inbox = inbox
 
     def process(self, path: str | Path) -> ProcessResult:
         p = Path(path)
@@ -59,6 +63,16 @@ class SignalProcessor:
         if is_halted(self.cfg.kill_switch_path):
             ep = ensure_episode(self.cfg.halt_latch_path, now)
             return self._halted(f"kill switch {ep['episode']}", p)
+
+        # 0. boundary: admit + dedupe (own-before-write, effectively once)
+        admission = self.inbox.admit(p) if self.inbox is not None else None
+        if admission is not None and admission.kind != "accepted":
+            if admission.kind == "deduped":
+                return ProcessResult("skipped_duplicate", reasons=(admission.detail,))
+            return ProcessResult(
+                "dead_lettered",
+                reasons=(f"{admission.reason_code}: {admission.detail}",),
+            )
 
         # 1. load + validate
         try:
@@ -94,8 +108,20 @@ class SignalProcessor:
             self.audit.append("warn", f"reference unavailable (ref_required=false): {exc}",
                               ticker=rd.ticker)
 
-        # 5. normalize -> contract
+        # 5. normalize -> contract, then route (the router owns the sleeve)
         contract = build_signal_contract(rd, self.mandate.expires.isoformat(), now, ref.equity)
+        try:
+            route = route_research(rd, self.cfg)
+        except RouteError as exc:
+            self.audit.append("rejected", f"sleeve routing refused: {exc}", ticker=rd.ticker)
+            self._notify_error("routing_refused", f"{rd.ticker}: {exc}")
+            if self.inbox is not None:
+                self.inbox.quarantine(
+                    {"ticker": rd.ticker, "decision_hash": rd.decision_hash},
+                    "sleeve_routing",
+                    str(exc),
+                )
+            return ProcessResult("blocked", reasons=(f"sleeve routing refused: {exc}",))
 
         # 6. gates
         journal_state = {
@@ -105,7 +131,9 @@ class SignalProcessor:
             "ingest_window_hours": self.cfg.ingest_window_hours,
             "approval_threshold_factor": self.cfg.approval_threshold_factor,
         }
-        gate: GateResult = evaluate(rd, contract, self.mandate, ref, journal_state, now)
+        gate: GateResult = evaluate(
+            rd, contract, self.mandate, ref, journal_state, now, self.cfg
+        )
 
         if gate.verdict == "BLOCK":
             self.audit.append(
@@ -115,11 +143,26 @@ class SignalProcessor:
                 gate_reasons=list(gate.reasons),
             )
             self._notify_error("signal_blocked", f"{rd.ticker}: {'; '.join(gate.blocked)}")
+            if self.inbox is not None and admission is not None:
+                # valid artifact, not permissible: quarantine, never discard silently
+                self.inbox.quarantine(
+                    {
+                        "ticker": rd.ticker,
+                        "action": contract.action,
+                        "decision_hash": rd.decision_hash,
+                        "sleeve": route.sleeve,
+                        "binding_gate": gate.binding_gate,
+                        "reasons": list(gate.blocked),
+                    },
+                    gate.binding_gate or "gate_block",
+                    "; ".join(gate.blocked),
+                    key=admission.key,
+                )
             return ProcessResult("blocked", reasons=gate.blocked)
 
         # 7. envelope
         seq = len(self.store.read_all()) + 1
-        envelope = self._build_envelope(rd, contract, gate, ref, seq, now)
+        envelope = self._build_envelope(rd, contract, gate, ref, seq, now, route.sleeve)
 
         # 8. persist + notify
         if self.cfg.dry_run:
@@ -140,6 +183,8 @@ class SignalProcessor:
         if not ok:
             self.audit.append("notifier_failed", "webhook dispatch failed; signal persisted",
                               ticker=rd.ticker, signal_id=envelope["signal_id"])
+        if self.inbox is not None and admission is not None:
+            self.inbox.commit(admission.key, signal_id=envelope["signal_id"])
         return ProcessResult("emitted", envelope=envelope, reasons=gate.reasons)
 
     def _notify_error(self, source: str, detail: str) -> None:
@@ -159,6 +204,7 @@ class SignalProcessor:
         ref: RefData,
         seq: int,
         now: datetime,
+        sleeve: str,
     ) -> dict[str, Any]:
         band = self._cost_band(ref)
         return {
@@ -185,6 +231,17 @@ class SignalProcessor:
             "approval": {
                 "state": "WAIT_FOR_APPROVAL" if gate.approval_required else "not_required"
             },
+            # --- v2 (additive; plan §2.3) --------------------------------
+            "sleeve": sleeve,
+            "opportunity_score": contract.opportunity_score,
+            "trade_permission": gate.trade_permission,
+            "binding_gate": gate.binding_gate,
+            "permission_reason_code": gate.permission_reason_code,
+            "permission_reason": "; ".join(gate.blocked or gate.downgrades or gate.reasons),
+            "idempotency_key": contract.idempotency_key,
+            "valid_until": contract.valid_until,
+            "stop_kind": contract.stop_kind or "native",
+            "schema_version": "1.1.0",
             "emitted_at": now.isoformat(timespec="seconds"),
             "config_hash": self.cfg.config_hash(),
             "commit": _commit(),

@@ -31,6 +31,11 @@ you* what it thinks should happen, and only after checking many safety boxes.
 - ❌ Touch real money
 - ❌ Connect to any broker to execute trades
 
+(The code for a **paper** order path now exists and is tested, but it is off:
+`mode` defaults to `signal` — no order path at all — and paper/live additionally
+need an explicit `execute=True`. The live broker adapters are still missing, so
+nothing can reach a broker even if switched on. See §8.)
+
 A **signal is advice only**. You decide whether to act on it.
 
 ## 3. How it works — the flow
@@ -126,10 +131,14 @@ Translation:
 
 | Coming later | What it means |
 |---|---|
-| **Paper trading** | Actually placing simulated orders at a broker (no real money) |
-| **Live trading** | Real orders — requires you to explicitly opt in twice |
-| **Auto-exit (sweeper)** | Automatically closing positions on a halt — not yet |
+| **Live broker adapters** | The code path exists and is tested with fake venues; the real Alpaca order/market-data adapters are the remaining P5 work |
+| **Live trading** | Real orders — requires two independent opt-ins, a promotion checklist and a hard capital cap |
 | **More brokers** | Only Alpaca planning so far; multi-broker later |
+
+What IS built (all off by default): the risk gate that would judge every order,
+the sizing rules, the order safety checks (no market orders, stops required,
+duplicate and self-cross protection), the intraday setup engine, the scorecard,
+and the operator commands `probe`, `simulate`, `halt`, `scorecard`.
 
 Until you explicitly say otherwise, **this system only ever sends signals. It
 never trades.**
@@ -141,6 +150,17 @@ leave it running:
 
 ```
 py -3.12 -m signald run --execute
+```
+
+Four more commands exist for checking and for emergencies (all safe to run):
+
+```
+py -3.12 -m signald probe                     # would the executor accept the newest research file?
+py -3.12 -m signald simulate --symbol AVGO --price 100 --stop 95 --at 09:45
+                                              # what would the risk gate say about this trade?
+py -3.12 -m signald halt                      # STOP: engages the kill switch immediately
+py -3.12 -m signald halt --resume --post-mortem PM-2026-09-12   # re-arm (needs a written post-mortem)
+py -3.12 -m signald scorecard --trades trades.jsonl             # sleeve report card
 ```
 
 (Start it from the TradingExecution folder. Details live in the technical

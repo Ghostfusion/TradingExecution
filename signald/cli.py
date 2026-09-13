@@ -15,7 +15,7 @@ from pathlib import Path
 from .alpaca_ref import AlpacaReference
 from .config import Config, load_config
 from .daemon import AlreadyRunning, DaemonLock, touch_heartbeat
-from .kill_switch import is_halted
+from .kill_switch import ensure_episode, is_halted, resume
 from .mandate import DEFAULT_MANDATE, MandateError, load_mandate, write_mandate
 from .notifier import Notifier
 from .processor import SignalProcessor
@@ -218,6 +218,249 @@ def cmd_init_mandate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _artifact_under(watch: Path, *, recursive: bool) -> Path | None:
+    """Newest research_decision.json under the watch dir (the probe's view)."""
+    from .watch import ARTIFACT_NAME
+
+    if not watch.exists():
+        return None
+    files = list(watch.rglob(ARTIFACT_NAME)) if recursive else list(watch.glob("*.json"))
+    if not files:
+        return None
+    return max(files, key=lambda f: f.stat().st_mtime)
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    """Validate the newest dropped artifact against the boundary contract (plan §1.2).
+
+    The nightly probe: it answers "would the executor accept what the research
+    layer just wrote?" before a live run has to. Read-only.
+    """
+    import json as _json
+
+    from .contracts import EnvelopeError, validate_envelope
+
+    ov = _state_overrides(args)
+    if args.watch:
+        ov["watch_dir"] = args.watch
+    if args.data:
+        ov["data_dir"] = args.data
+    cfg = load_config(env_file=args.env, **ov)
+    path = Path(args.artifact) if args.artifact else _artifact_under(
+        Path(cfg.watch_dir), recursive=cfg.watch_recursive
+    )
+    if path is None:
+        print(f"probe: no research artifact under {cfg.watch_dir}", file=sys.stderr)
+        return 1
+    try:
+        raw = _json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError) as exc:
+        print(f"probe: INVALID unreadable — {exc}", file=sys.stderr)
+        return 1
+    try:
+        version = validate_envelope(raw, now=cfg.now())
+    except EnvelopeError as exc:
+        print(f"probe: INVALID {exc.reason_code} — {exc.detail}")
+        return 1
+    print(
+        f"probe: OK {Path(path).name} schema={raw.get('schema_version')} "
+        f"major={version[0]} ticker={raw.get('ticker')} expires_at={raw.get('expires_at')}"
+    )
+    return 0
+
+
+def cmd_simulate(args: argparse.Namespace) -> int:
+    """Full gate evaluation of a draft order - no side effects (plan §7.1 simulate)."""
+    import json as _json
+
+    from .risk.gate import GateContext, evaluate
+    from .risk.ladder import rung_for
+    from .risk.state import BookState, MarketState, RiskRequest
+    from .risk.tail import ESResult
+    from .risk.voltarget import vol_scalar
+    from .sleeves.budgets import budget_for
+
+    ov = _state_overrides(args)
+    cfg = load_config(env_file=args.env, **ov)
+    try:
+        mandate = load_mandate(cfg.mandate_path)
+    except MandateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    stop_distance = abs(args.price - args.stop)
+    request = RiskRequest(
+        sleeve=args.sleeve,
+        symbol=args.symbol.upper(),
+        setup=args.setup,
+        side=args.side,
+        stop_distance=stop_distance,
+        price=args.price,
+        equity=args.equity,
+        requested_risk_pct=args.risk,
+        stop_price=args.stop,
+        measured_move_bps=args.move_bps,
+        round_trip_cost_bps=args.cost_bps,
+        planned_notional_usd=args.notional,
+        trailing_volume=args.adv,
+    )
+    book = BookState(equity=args.equity, cash=args.cash)
+    market = MarketState(
+        symbol=args.symbol.upper(),
+        last=args.price,
+        spread_bps=args.spread_bps,
+        spread_median_bps=args.spread_bps,
+        quote_age_s=0.0,
+        bar_age_s=0.0,
+        adv_shares=args.adv,
+        atr=args.atr,
+        day_type=args.day_type,
+        data_quality=args.data_quality,
+        price_caliber="adjusted",
+        session="rth",
+        feed=cfg.data_feed,
+        shortable=True,
+    )
+    budget = budget_for(cfg, args.sleeve, book)
+    stamp = cfg.now()
+    if args.at:
+        hour, _, minute = str(args.at).partition(":")
+        stamp = stamp.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    ctx = GateContext(
+        request=request,
+        book=book,
+        market=market,
+        mandate=mandate,
+        config=cfg,
+        now=stamp,
+        ladder=rung_for(
+            day_pnl_pct=0.0,
+            five_day_pct=0.0,
+            drawdown_pct=0.0,
+            soft_pct=cfg.daily_loss_soft_pct,
+            hard_pct=cfg.daily_loss_hard_pct,
+            derisk_5d_pct=cfg.derisk_5d_pct,
+            derisk_dd_pct=cfg.derisk_dd_pct,
+            halt_dd_pct=cfg.derisk_halt_dd_pct,
+        ),
+        vol=vol_scalar((), target=cfg.sleeve_intraday_vol_target, warmup_days=cfg.vol_warmup_days),
+        es=(
+            ESResult(
+                value_pct=args.es_pct,
+                estimator="historical",
+                flagged=False,
+                window_days=cfg.es_backtest_days,
+                components={"historical": args.es_pct},
+            )
+            if args.es_pct is not None
+            else ESResult(
+                value_pct=0.0,
+                estimator="unavailable",
+                flagged=True,
+                window_days=0,
+                components={},
+            )
+        ),
+        sleeve_ceiling_pct=budget.capital_ceiling_pct,
+        sleeve_deployed_pct=0.0,
+        setup_validated=True,
+        day_type=args.day_type,
+        stage="order",
+    )
+    decision = evaluate(ctx)
+    print(
+        _json.dumps(
+            {
+                "verdict": decision.verdict,
+                "binding_gate": decision.binding_gate,
+                "reason_code": decision.permission_reason_code,
+                "adjusted_risk_pct": decision.adjusted_risk_pct,
+                "approval_required": decision.approval_required,
+                "reasons": list(decision.reasons),
+                "state_snapshot": decision.state_snapshot,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def cmd_halt(args: argparse.Namespace) -> int:
+    """Engage (or re-arm) the kill switch (plan §11.3). Re-arm needs a post-mortem."""
+    ov = _state_overrides(args)
+    if args.kill_switch:
+        ov["kill_switch_path"] = args.kill_switch
+    if args.data:
+        ov["data_dir"] = args.data
+    cfg = load_config(env_file=args.env, **ov)
+    audit = AuditChain(cfg.audit_file, cfg.now)
+    if args.resume:
+        if not args.post_mortem:
+            print(
+                "error: re-arm requires --post-mortem <reference> (plan §11.3: manual only)",
+                file=sys.stderr,
+            )
+            return 1
+        resume(cfg.kill_switch_path, cfg.halt_latch_path)
+        audit.append(
+            "kill_switch_resumed",
+            f"re-armed after {args.post_mortem}",
+            post_mortem=args.post_mortem,
+            operator=args.operator,
+        )
+        print(f"kill switch cleared; episode retained at {cfg.halt_latch_path}. "
+              "Size restores in steps (25/50/100%) per plan §11.3.")
+        return 0
+    Path(cfg.kill_switch_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(cfg.kill_switch_path).write_text(
+        f"halted by {args.operator} at {_now_str(cfg)}\n", encoding="utf-8"
+    )
+    ep = ensure_episode(cfg.halt_latch_path, cfg.now())
+    audit.append("kill_switch", f"manual halt by {args.operator}", episode=ep["episode"])
+    print(f"HALTED episode {ep['episode']} since {ep['since']} (sentinel {cfg.kill_switch_path})")
+    return 0
+
+
+def cmd_scorecard(args: argparse.Namespace) -> int:
+    """Summarise a trade-rows file into the committed scorecard (plan §10.3, §11.3)."""
+    import json as _json
+
+    from .lineage import scorecard, write_scorecard
+
+    cfg = load_config(env_file=args.env, **_state_overrides(args))
+    path = Path(args.trades)
+    if not path.exists():
+        print(f"error: no trade rows at {path}", file=sys.stderr)
+        return 1
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(_json.loads(line))
+        except _json.JSONDecodeError:
+            continue
+    sleeves = sorted({str(r.get("sleeve") or "unknown") for r in rows})
+    if not sleeves:
+        print("error: no usable trade rows", file=sys.stderr)
+        return 1
+    cards = {s: scorecard([r for r in rows if str(r.get("sleeve") or "unknown") == s], sleeve=s)
+             for s in sleeves}
+    out = write_scorecard(
+        Path(args.out) if args.out else Path(cfg.data_dir) / "scorecard",
+        scorecards=cards,
+        comparison=None,
+        trials=int(args.trials),
+        generated_at=cfg.now(),
+    )
+    for s, card in cards.items():
+        print(f"{s}: trades={card.trades} adequate={card.sample_adequate}")
+    print(f"wrote scorecard: {out}")
+    return 0
+
+
+
 def _describe(r) -> str:
     if r.envelope is None:
         return "; ".join(r.reasons) or r.kind
@@ -288,6 +531,66 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--operator", default="vince")
     ap.add_argument("--env")
     ap.set_defaults(func=cmd_approve)
+
+    pr = sub.add_parser("probe", help="validate the newest research artifact (read-only)")
+    pr.add_argument("--artifact", help="explicit artifact path")
+    pr.add_argument("--watch")
+    pr.add_argument("--data")
+    pr.add_argument("--env")
+    pr.set_defaults(func=cmd_probe)
+
+    si = sub.add_parser("simulate", help="full gate evaluation of a draft order (no side effects)")
+    si.add_argument("--symbol", required=True)
+    si.add_argument("--setup", default="ORB_RVOL")
+    si.add_argument("--side", choices=["buy", "sell"], default="buy")
+    si.add_argument("--sleeve", choices=["swing", "intraday"], default="intraday")
+    si.add_argument("--price", type=float, required=True)
+    si.add_argument("--stop", type=float, required=True)
+    si.add_argument("--risk", type=float, default=0.0025, help="risk fraction of equity")
+    si.add_argument("--equity", type=float, default=100000.0)
+    si.add_argument("--cash", type=float, default=50000.0)
+    si.add_argument("--adv", type=float, default=5000000.0)
+    si.add_argument("--atr", type=float, default=1.0)
+    si.add_argument("--spread-bps", type=float, default=4.0, dest="spread_bps")
+    si.add_argument("--move-bps", type=float, default=60.0, dest="move_bps")
+    si.add_argument("--cost-bps", type=float, default=None, dest="cost_bps")
+    si.add_argument("--notional", type=float, default=None)
+    si.add_argument(
+        "--es-pct",
+        type=float,
+        default=None,
+        dest="es_pct",
+        help="the book's measured 1-day ES as a fraction (omitting it blocks on house_cvar)",
+    )
+    si.add_argument(
+        "--at",
+        default=None,
+        help="simulate at HH:MM instead of now (the intraday window is time-gated)",
+    )
+    si.add_argument("--day-type", default="trend", dest="day_type")
+    si.add_argument("--data-quality", default="fresh", dest="data_quality")
+    si.add_argument("--env")
+    si.add_argument("--data", dest="data")
+    si.set_defaults(func=cmd_simulate)
+
+    ha = sub.add_parser("halt", help="engage the kill switch; --resume re-arms it")
+    ha.add_argument(
+        "--resume", action="store_true", help="clear the sentinel (needs --post-mortem)"
+    )
+    ha.add_argument("--post-mortem", default=None)
+    ha.add_argument("--operator", default="vince")
+    ha.add_argument("--kill-switch", default=None)
+    ha.add_argument("--data")
+    ha.add_argument("--env")
+    ha.set_defaults(func=cmd_halt)
+
+    sc = sub.add_parser("scorecard", help="write the sleeve scorecard from a trade-rows JSONL")
+    sc.add_argument("--trades", required=True, help="trade rows JSONL (plan §10.2 shape)")
+    sc.add_argument("--out", default=None, help="output basename (default <data>/scorecard)")
+    sc.add_argument("--trials", type=int, default=0)
+    sc.add_argument("--env")
+    sc.add_argument("--data")
+    sc.set_defaults(func=cmd_scorecard)
 
     im = sub.add_parser("init-mandate", help="write a fresh signed mandate")
     im.add_argument("--mandate", default=None)

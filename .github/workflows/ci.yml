@@ -1,0 +1,97 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# Both jobs run without secrets: the suite is hermetic (fake broker transport)
+# and the independence job deliberately strips any broker credentials.
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (editable + dev extras)
+        run: py -3.12 -m pip install -e ".[dev]"
+      - name: Lint
+        run: py -3.12 -m ruff check signald/ tests/
+      - name: Test
+        run: py -3.12 -m pytest tests/ -q -p no:cacheprovider
+
+  independence:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (editable + dev extras)
+        run: py -3.12 -m pip install -e ".[dev]"
+      # The same sibling-repo scan is mirrored by
+      # tests/test_contract_schemas.py::test_signald_carries_no_sibling_repo_coupling,
+      # so it also runs locally and in the `test` job above.
+      - name: signald/ names no sibling repo (imports / env prefix)
+        shell: python
+        run: |
+          import ast
+          import pathlib
+          import sys
+
+          FORBIDDEN_ROOTS = ("tradingagents", "trading_web")
+          FORBIDDEN_ENV_PREFIX = "TRADINGAGENTS_"
+          offenders = {}
+          for path in sorted(pathlib.Path("signald").rglob("*.py")):
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              bad = []
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      bad += [a.name for a in node.names if a.name.split(".")[0] in FORBIDDEN_ROOTS]
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      if node.module.split(".")[0] in FORBIDDEN_ROOTS:
+                          bad.append(node.module)
+                  elif isinstance(node, ast.Name) and node.id.split(".")[0] in FORBIDDEN_ROOTS:
+                      bad.append(node.id)
+                  elif (
+                      isinstance(node, ast.Constant)
+                      and isinstance(node.value, str)
+                      and node.value.startswith(FORBIDDEN_ENV_PREFIX)
+                  ):
+                      bad.append(node.value)
+              if bad:
+                  offenders[str(path)] = bad
+          if offenders:
+              print("sibling-repo coupling found:", offenders)
+              sys.exit(1)
+          print("signald/ has no sibling-repo coupling")
+      # Prove the execution layer ships alone: no sibling checkout is visible and
+      # no ALPACA_*/APCA_*/TRADINGEXEC_ALPACA_* credential can leak into a test.
+      - name: Suite runs with the sibling repo absent and no broker credentials
+        shell: python
+        run: |
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+          import sys
+
+          root = pathlib.Path.cwd()
+          stash = root.parent / "_siblings_set_aside"
+          for name in ("TradingAgents", "trading_web"):
+              sibling = root.parent / name
+              if sibling.exists():
+                  stash.mkdir(exist_ok=True)
+                  shutil.move(str(sibling), str(stash / name))
+                  print(f"moved aside {sibling}")
+
+          credential_prefixes = ("ALPACA_", "APCA_", "TRADINGEXEC_ALPACA_")
+          env = {k: v for k, v in os.environ.items() if not k.startswith(credential_prefixes)}
+          assert not any(k.startswith(credential_prefixes) for k in env)
+          raise SystemExit(
+              subprocess.call(
+                  [sys.executable, "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider"],
+                  env=env,
+              )
+          )

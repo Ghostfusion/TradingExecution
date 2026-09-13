@@ -8,9 +8,11 @@ research layer ships its own emitter.
 from __future__ import annotations
 
 import json
-from datetime import date
+import uuid
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
+from .contracts import SCHEMA_VERSION
 from .schema import sha256_of
 
 DEFAULT_SAMPLE = {
@@ -57,6 +59,69 @@ def build_sample(
     doc.update(overrides)
     body = json.loads(json.dumps(doc, sort_keys=True, default=str))
     doc["decision_hash"] = "sha256:" + sha256_of(body)
+    return doc
+
+
+def doc_effective_date(doc: dict) -> date:
+    return date.fromisoformat(str(doc["effective_date"]))
+
+
+def build_sample_v11(
+    ticker: str = "AVGO",
+    direction: str = "reduce",
+    effective_date: date | None = None,
+    *,
+    produced_at: datetime | None = None,
+    expires_at: datetime | None = None,
+    run_id: str | None = None,
+    opportunity_score: float | None = 42.0,
+    data_quality: str = "fresh",
+    **overrides,
+) -> dict:
+    """A schema-1.1.0 artifact: idempotency key, producer block, expiry, both hashes.
+
+    This is the shape the research layer must emit (implementation plan §2.2).
+    ``expires_at`` defaults to 20:00 ET-equivalent (naive UTC) on the decision
+    date; callers pass an explicit value when the clock matters.
+    """
+    doc = build_sample(
+        ticker=ticker,
+        direction=direction,
+        effective_date=effective_date,
+        data_quality=data_quality,
+        **overrides,
+    )
+    base_date = doc_effective_date(doc)
+    # envelope timestamps are RFC 3339 WITH an offset: a naive stamp is
+    # ambiguous and the execution layer rejects it (contracts.naive_timestamp)
+    produced = produced_at or datetime.combine(base_date, time(13, 45), tzinfo=UTC)
+    expires = expires_at or datetime.combine(base_date, time(20, 0), tzinfo=UTC)
+    generated = {
+        "schema_version": SCHEMA_VERSION,
+        "idempotency_key": str(uuid.uuid4()),
+        "produced_at": produced.isoformat(timespec="seconds"),
+        "expires_at": expires.isoformat(timespec="seconds"),
+        "producer": {
+            "service": "tradingagents",
+            "git_sha": "sample000",
+            "run_id": run_id or str(uuid.uuid4()),
+        },
+        "opportunity_score": opportunity_score,
+        "risk_context": {
+            "regime": "risk-on",
+            "research_cvar_975_1d_pct": 1.1,
+            "risk_gate": {"verdict": "PASS", "reasons": []},
+        },
+        "disclosure": {"sources_used": ["eodhd"], "sources_empty": []},
+    }
+    for key, value in generated.items():
+        doc.setdefault(key, value)  # explicit caller values win
+    doc["artifact_sha256"] = sha256_of(
+        {k: v for k, v in doc.items() if k not in ("artifact_sha256", "decision_hash")}
+    )
+    doc["decision_hash"] = "sha256:" + sha256_of(
+        {k: v for k, v in doc.items() if k != "decision_hash"}
+    )
     return doc
 
 
