@@ -425,7 +425,12 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     """Summarise a trade-rows file into the committed scorecard (plan §10.3, §11.3)."""
     import json as _json
 
-    from .lineage import scorecard, write_scorecard
+    from .lineage import (
+        kill_shrink_decision,
+        scorecard,
+        write_review_report,
+        write_scorecard,
+    )
 
     cfg = load_config(env_file=args.env, **_state_overrides(args))
     path = Path(args.trades)
@@ -457,6 +462,29 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     for s, card in cards.items():
         print(f"{s}: trades={card.trades} adequate={card.sample_adequate}")
     print(f"wrote scorecard: {out}")
+    if args.review:
+        decisions = []
+        for s, card in sorted(cards.items()):
+            metrics = card.metrics
+            expectancy = metrics.get("expectancy_usd")
+            decisions.append(
+                kill_shrink_decision(
+                    sleeve=s,
+                    trades=card.trades,
+                    expectancy_usd=None if expectancy is None else float(expectancy),
+                    current_pct=0.0,
+                    sample_adequate=card.sample_adequate,
+                    cvar_share=metrics.get("cvar_share"),
+                    return_share=metrics.get("return_share"),
+                    shrink_pct=0.10,
+                )
+            )
+        review = write_review_report(
+            Path(args.review), decisions=decisions, generated_at=cfg.now(), trials=int(args.trials)
+        )
+        for d in decisions:
+            print(f"review {d.sleeve}: {d.verdict} ({d.reason_code})")
+        print(f"wrote review: {review}")
     return 0
 
 
@@ -588,6 +616,9 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--trades", required=True, help="trade rows JSONL (plan §10.2 shape)")
     sc.add_argument("--out", default=None, help="output basename (default <data>/scorecard)")
     sc.add_argument("--trials", type=int, default=0)
+    sc.add_argument(
+        "--review", default=None, help="also write the kill/shrink review note at this basename"
+    )
     sc.add_argument("--env")
     sc.add_argument("--data")
     sc.set_defaults(func=cmd_scorecard)

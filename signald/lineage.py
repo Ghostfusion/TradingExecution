@@ -746,3 +746,156 @@ def write_scorecard(
     _atomic_write(json_path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     _atomic_write(md_path, _scorecard_markdown(payload))
     return md_path
+
+# --------------------------------------------------------------------------
+# Pre-registered kill / shrink criteria (design §7.6, plan §P6)
+# --------------------------------------------------------------------------
+KILL = "kill"
+SHRINK = "shrink"
+KEEP = "keep"
+#: The order the criteria are evaluated in: the first one that matches decides.
+REVIEW_CRITERIA = (
+    "negative_expectation",
+    "cvar_grows_without_return",
+    "weak_risk_adjusted_contribution",
+    "insufficient_evidence",
+    "keep",
+)
+#: A sleeve must have at least this many trades before a verdict may act on it.
+MIN_TRADES_FOR_VERDICT = 100
+
+
+@dataclass(frozen=True)
+class ReviewDecision:
+    """The mechanical outcome of the pre-registered criteria - never a judgement call."""
+
+    sleeve: str
+    verdict: str            # kill | shrink | keep
+    reason_code: str        # one of REVIEW_CRITERIA
+    detail: str
+    target_pct: float | None = None
+
+    @property
+    def acts(self) -> bool:
+        return self.verdict in {KILL, SHRINK}
+
+
+def kill_shrink_decision(
+    *,
+    sleeve: str,
+    trades: int,
+    expectancy_usd: float | None,
+    current_pct: float,
+    sample_adequate: bool,
+    bootstrap: Mapping[str, float] | None = None,
+    predicted_expectancy_usd: float | None = None,
+    cvar_share: float | None = None,
+    return_share: float | None = None,
+    shrink_pct: float = 0.10,
+) -> ReviewDecision:
+    """Evaluate design §7.6 in order; the decision is computed from the journal.
+
+    Every input is evidence, never opinion: an unavailable input cannot *cause* a
+    kill (it falls through), and a kill requires an adequate sample - stopping a
+    live sleeve on noise is the failure mode the pre-registration exists to
+    prevent. The verdict is executed mechanically; sunk cost is not an input.
+    """
+    enough = trades >= MIN_TRADES_FOR_VERDICT and sample_adequate
+    ci_excludes_prediction = False
+    if bootstrap and predicted_expectancy_usd is not None:
+        low, high = bootstrap.get("ci_low"), bootstrap.get("ci_high")
+        if low is not None and high is not None:
+            ci_excludes_prediction = not (float(low) <= predicted_expectancy_usd <= float(high))
+
+    if (
+        enough
+        and expectancy_usd is not None
+        and expectancy_usd <= 0
+        and (predicted_expectancy_usd is None or ci_excludes_prediction)
+    ):
+        suffix = (
+            " with the interval excluding the backtest prediction"
+            if ci_excludes_prediction
+            else ""
+        )
+        return ReviewDecision(
+            sleeve,
+            KILL,
+            "negative_expectation",
+            f"net expectancy {expectancy_usd:,.2f} over {trades} trades{suffix}",
+        )
+
+    if cvar_share is not None and return_share is not None and cvar_share > return_share:
+        return ReviewDecision(
+            sleeve,
+            KILL,
+            "cvar_grows_without_return",
+            f"CVaR share {cvar_share:.2f} exceeds return share {return_share:.2f}",
+        )
+
+    if enough and expectancy_usd is not None and expectancy_usd > 0:
+        if bootstrap and not bool(bootstrap.get("excludes_zero")):
+            return ReviewDecision(
+                sleeve,
+                SHRINK,
+                "weak_risk_adjusted_contribution",
+                "positive but the paired interval does not clear zero",
+                target_pct=shrink_pct,
+            )
+        return ReviewDecision(
+            sleeve,
+            KEEP,
+            "keep",
+            f"expectancy {expectancy_usd:,.2f} over {trades} trades with an interval clear of zero",
+            target_pct=current_pct,
+        )
+
+    return ReviewDecision(
+        sleeve,
+        KEEP,
+        "insufficient_evidence",
+        f"{trades} trades (need {MIN_TRADES_FOR_VERDICT} and an adequate sample) - no action",
+        target_pct=current_pct,
+    )
+
+
+def write_review_report(
+    path: str | Path,
+    *,
+    decisions: Sequence[ReviewDecision],
+    generated_at: datetime,
+    trials: int,
+) -> Path:
+    """Write the committed review note: the verdicts, N, and the claim limit."""
+    payload = {
+        "generated_at": generated_at.isoformat(timespec="seconds"),
+        "trials": int(trials),
+        "claim_limit": FEASIBILITY_CLAIM,
+        "decisions": [
+            {
+                "sleeve": d.sleeve,
+                "verdict": d.verdict,
+                "reason_code": d.reason_code,
+                "detail": d.detail,
+                "target_pct": d.target_pct,
+            }
+            for d in decisions
+        ],
+    }
+    payload["artifact_sha256"] = sha256_of(payload)
+    base = str(path)
+    _atomic_write(Path(base + ".json"), json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    lines = [
+        "# Parallel-review decision",
+        "",
+        f"Generated: {payload['generated_at']}",
+        f"Trials (N): {payload['trials']}",
+        f"Claim limit: {payload['claim_limit']}",
+        "",
+    ]
+    for d in decisions:
+        target = "" if d.target_pct is None else f" -> {d.target_pct:.0%}"
+        lines.append(f"- {d.sleeve}: **{d.verdict}** ({d.reason_code}){target} - {d.detail}")
+    lines.append("")
+    _atomic_write(Path(base + ".md"), "\n".join(lines))
+    return Path(base + ".md")

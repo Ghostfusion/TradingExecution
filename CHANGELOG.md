@@ -5,7 +5,7 @@ Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 ## 2026-09-12 (b) — two-sleeve intraday execution, phases P0–P6 implemented
 
 The design/plan entries below became code. 36 new modules, 34 new test files,
-**1033 hermetic tests green, ruff clean**; the order path is unreachable unless
+**1044 hermetic tests green, ruff clean**; the order path is unreachable unless
 `mode` is `paper`/`live` **and** the caller passes `execute=True`, and every
 submission carries a `GateDecision`.
 
@@ -62,7 +62,10 @@ LLM-authored number, approval bound to the proposal hash, single-use),
 `promotion.py` (the §11.4 checklist as machine-checked items, two opt-ins),
 `docs/RUNBOOK.md` (daily lifecycle, incident table, kill/re-arm with staged size
 restore, RTO/RPO), `cli.py` gains `probe`, `simulate`, `halt`/`--resume` (re-arm
-requires a post-mortem reference), `scorecard`.
+requires a post-mortem reference), `scorecard --review` (the pre-registered
+kill/shrink verdict, computed from the journal: a kill needs ≥100 trades and an
+adequate sample, an interval that still touches zero shrinks to 10%, and an
+unavailable input can never cause a kill).
 
 **Two boundary defects found by writing the consumer's tests** (both in the
 research-side plan `TradingAgents/docs/execution_v1_emitter_plan.md`):

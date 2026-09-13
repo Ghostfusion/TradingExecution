@@ -260,6 +260,37 @@ def test_scorecard_writes_json_and_markdown(tmp_path, capsys):
     assert "feasibility, not superiority" in markdown  # no winner is declared
 
 
+def test_scorecard_can_write_the_kill_shrink_review(tmp_path, capsys):
+    rows = tmp_path / "trades.jsonl"
+    rows.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "sleeve": "intraday",
+                    "symbol": "AVGO",
+                    "qty": 10,
+                    "entry_px": 100.0,
+                    "exit_px": 99.0,
+                    "fees_usd": 0.5,
+                    "r_multiple": -1.0,
+                }
+            )
+            for _ in range(3)
+        ),
+        encoding="utf-8",
+    )
+
+    rc = cli.main(
+        ["scorecard", "--trades", str(rows), "--env", _env(tmp_path),
+         "--out", str(tmp_path / "card"), "--review", str(tmp_path / "review"), "--trials", "3"]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0 and "review intraday:" in out
+    note = (tmp_path / "review.md").read_text(encoding="utf-8")
+    assert "Trials (N): 3" in note and "**keep**" in note  # three trades cannot kill
+
+
 def test_scorecard_reports_a_missing_file(tmp_path, capsys):
     rc = cli.main(["scorecard", "--trades", str(tmp_path / "nope.jsonl"), "--env", _env(tmp_path)])
 
