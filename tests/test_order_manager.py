@@ -108,7 +108,7 @@ def test_happy_submit_writes_the_pending_row_then_returns_the_broker_body(tmp_pa
             "side": "buy",
             "qty": 10,
             "status": "pending",
-            "at": "2026-09-12T12:00:00",
+            "at": now.isoformat(),
         }
     ]
     assert "order_submitted" in kinds(chain)

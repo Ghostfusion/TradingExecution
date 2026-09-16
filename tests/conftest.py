@@ -6,13 +6,14 @@ full pipeline runs with ZERO network access.
 
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, time
 from pathlib import Path
 
 import pytest
 
 from signald.alpaca_ref import AlpacaReference
-from signald.config import Config
+from signald.config import _PREFIXES, Config
 from signald.mandate import DEFAULT_MANDATE, load_mandate, write_mandate
 from signald.notifier import Notifier
 from signald.processor import SignalProcessor
@@ -25,6 +26,19 @@ from signald.stores import AuditChain, Journal, SignalStore
 NOW = datetime.combine(date.today(), time(12, 0))
 
 pytestmark = pytest.mark.timeout(120)
+
+
+@pytest.fixture(autouse=True)
+def hermetic_environment(monkeypatch):
+    """No test may inherit this developer's shell (load_config prefers it to .env).
+
+    A real ``TRADINGEXEC_*``/``ALPACA_*`` export - the daemon's own env when it
+    runs from this shell - silently outranks the test's ``--env`` file and
+    redirects the watch dir, the mandate or the webhook. Strip them for every
+    test; a test that wants one sets it itself.
+    """
+    for key in [k for k in os.environ if k.startswith(_PREFIXES)]:
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture

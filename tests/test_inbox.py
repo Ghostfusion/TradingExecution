@@ -9,7 +9,7 @@ admission from a completed one.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
@@ -20,7 +20,10 @@ from signald.stores import AuditChain
 
 pytestmark = pytest.mark.timeout(120)
 
-NOW = datetime(2026, 9, 12, 14, 0)
+# Today, like conftest's clock: ``build_sample_v11`` dates the artifact from its
+# effective date and expires it at 20:00, so a fixed past date here dead-letters
+# every v1.1 artifact the moment the wall clock moves past it.
+NOW = datetime.combine(date.today(), time(14, 0))
 
 
 @pytest.fixture()
