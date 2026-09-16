@@ -20,7 +20,7 @@ The two stages differ in exactly two places, both documented in the gate:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from .alpaca_ref import RefData
@@ -66,10 +66,17 @@ def _spread_bps(ref: RefData) -> float | None:
 
 
 def _quote_age_s(ref: RefData, now: datetime) -> float | None:
+    """Age of the reference quote, in seconds.
+
+    Both sides are normalised to UTC-aware first: a naive stamp follows the
+    envelope convention (UTC), and an aware one is converted - so neither a
+    tz-free daemon clock nor an aware injected clock changes the answer.
+    """
     if ref.ts is None:
         return None
-    stamp = ref.ts.replace(tzinfo=None) if ref.ts.tzinfo is not None else ref.ts
-    return max(0.0, (now - stamp).total_seconds())
+    stamp = ref.ts.replace(tzinfo=UTC) if ref.ts.tzinfo is None else ref.ts.astimezone(UTC)
+    current = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
+    return max(0.0, (current - stamp).total_seconds())
 
 
 def _request(contract: SignalContract, ref: RefData, sleeve: str = SWING) -> RiskRequest:
@@ -180,6 +187,7 @@ def build_context(
         cooldown_hours=float(journal_state.get("cooldown_hours", 12.0) or 12.0),
         action=contract.action,
         research_risk_context=dict(rd.risk_context),
+        held_symbols=ref.held_symbols,
     )
 
 

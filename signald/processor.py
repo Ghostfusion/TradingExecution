@@ -18,11 +18,16 @@ from .config import Config
 from .gates import GateResult, evaluate
 from .inbox import Inbox
 from .kill_switch import ensure_episode, is_halted, read_episode
-from .mandate import Mandate
+from .mandate import Mandate, MandateError, load_mandate
 from .notifier import Notifier
 from .schema import ContractError, build_signal_contract, parse_research_decision
 from .sleeves.router import RouteError, route_research
-from .stores import AuditChain, Journal, SignalStore
+from .stores import AuditChain, CandidateStore, Journal, SignalStore
+
+#: Ratings (case-insensitive) that make a not-held name worth offering to the
+#: operator. Deliberately narrow: "buy"/"overweight" only, so the queue is the
+#: handful of names research actually likes rather than everything it mentions.
+PROMOTABLE_RATINGS: frozenset[str] = frozenset({"buy", "overweight"})
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,7 @@ class SignalProcessor:
         reference: AlpacaReference,
         notifier: Notifier,
         inbox: Inbox | None = None,
+        candidates: CandidateStore | None = None,
     ) -> None:
         self.cfg = config
         self.mandate = mandate
@@ -52,6 +58,16 @@ class SignalProcessor:
         self.ref = reference
         self.notifier = notifier
         self.inbox = inbox
+        #: Candidates default to the data dir so every construction path (CLI,
+        #: tests, control surfaces) gets the queue without extra plumbing.
+        self.candidates = candidates or CandidateStore(
+            Path(config.data_dir) / "mandate_candidates.jsonl"
+        )
+        self._mandate_hash = mandate.hash
+        #: (mtime_ns, size) of the mandate file as last loaded; None forces the
+        #: first refresh to prove the file still matches the loaded mandate.
+        self._mandate_stamp: tuple[int, int] | None = None
+        self._reload_failure: str | None = None
 
     def process(self, path: str | Path) -> ProcessResult:
         p = Path(path)
@@ -89,10 +105,12 @@ class SignalProcessor:
                               ticker=rd.ticker, path=str(p))
             return ProcessResult("blocked", reasons=("effective_date in the future",))
 
-        # 3. idempotency
-        if self.journal.is_processed(rd.decision_hash):
-            self.audit.append("skipped_duplicate", "decision_hash already processed",
-                              ticker=rd.ticker, decision_hash=rd.decision_hash)
+        # 3. idempotency. The skip is silent on purpose: the poll re-discovers
+        # every artifact still sitting in the watch tree, and the audit ledger
+        # records decisions, not poll cycles (2026-09-15: one artifact in
+        # reports/ added a skipped_duplicate row every 10 s, ~8.6k rows/day of
+        # pure noise). The decision itself was recorded when it was handled.
+        if self.journal.is_processed(rd.decision_hash, mandate_hash=self._mandate_hash):
             return ProcessResult("skipped_duplicate")
 
         # 4. reference data (fail-closed when unavailable)
@@ -136,13 +154,23 @@ class SignalProcessor:
         )
 
         if gate.verdict == "BLOCK":
+            # A refusal is a durable verdict on this artifact (the mandate does
+            # not list the symbol, the book is out of room), so record it as
+            # processed like an emission. Without this the reports poll re-fires
+            # the same refusal every cycle: measured 2026-09-15 an ineligible
+            # artifact produced a rejected row + a Discord error card every 10 s
+            # (4 in 44 s). The row carries the mandate hash, so a deliberate
+            # ``signald mandate-add`` re-opens the artifact exactly once.
+            self.journal.mark_processed(rd.decision_hash, rd.ticker, str(p),
+                                        outcome="blocked", mandate_hash=self._mandate_hash)
             self.audit.append(
                 "rejected",
                 "; ".join(gate.blocked),
                 ticker=rd.ticker, decision_hash=rd.decision_hash,
                 gate_reasons=list(gate.reasons),
             )
-            self._notify_error("signal_blocked", f"{rd.ticker}: {'; '.join(gate.blocked)}")
+            if not self._offer_candidate(rd, contract, ref, gate):
+                self._notify_error("signal_blocked", f"{rd.ticker}: {'; '.join(gate.blocked)}")
             if self.inbox is not None and admission is not None:
                 # valid artifact, not permissible: quarantine, never discard silently
                 self.inbox.quarantine(
@@ -186,6 +214,91 @@ class SignalProcessor:
         if self.inbox is not None and admission is not None:
             self.inbox.commit(admission.key, signal_id=envelope["signal_id"])
         return ProcessResult("emitted", envelope=envelope, reasons=gate.reasons)
+
+    def _offer_candidate(self, rd, contract, ref: RefData, gate: GateResult) -> bool:
+        """Queue a strongly-rated, not-held name the mandate bars; True when queued.
+
+        Option A (2026-09-15): the executor never widens its own mandate. This
+        records the name for the operator and pages the exact promotion command
+        instead of a bare refusal. It fires only when the *symbol* check is what
+        blocked the decision, the rating is buy/overweight, and the account
+        provably does not hold the name - unknown holdings are not proof, so they
+        keep the plain refusal (fail closed).
+        """
+        ticker = str(rd.ticker).upper()
+        if ticker in self.mandate.allowed:
+            return False
+        if gate.binding_gate != "mandate" or "not in mandate" not in " ".join(gate.blocked):
+            return False
+        rating = str(rd.rating or "").strip().lower()
+        if rating not in PROMOTABLE_RATINGS:
+            return False
+        if ref.held_symbols is None or ticker in ref.held_symbols:
+            return False
+        if self.candidates.has(ticker, rd.decision_hash):
+            return False
+        producer = rd.extra.get("producer")
+        run_id = producer.get("run_id") if isinstance(producer, dict) else None
+        run_id = run_id or rd.extra.get("run_id")
+        run_id = None if run_id is None else str(run_id)
+        at = self.cfg.now().isoformat(timespec="seconds")
+        self.candidates.record(
+            ticker=ticker, rating=str(rd.rating), action=contract.action,
+            decision_hash=rd.decision_hash, target_pct=contract.target_pct,
+            stop=contract.stop_price, run_id=run_id, at=at,
+        )
+        self.audit.append("mandate_candidate",
+                          f"{ticker} {contract.action} ({rating}) is outside the mandate",
+                          ticker=ticker, decision_hash=rd.decision_hash,
+                          rating=str(rd.rating), action=contract.action)
+        if self.notifier.enabled:
+            self.notifier.send(self.notifier.mandate_candidate_event(
+                ticker=ticker, action=contract.action, rating=str(rd.rating),
+                decision_hash=rd.decision_hash, target_pct=contract.target_pct,
+                stop=contract.stop_price, run_id=run_id,
+            ))
+        return True
+
+    def refresh_mandate(self) -> str:
+        """Reload the mandate file when it changes: ``unchanged|reloaded|invalid``.
+
+        The mandate is loaded once at startup, so without this an operator's
+        ``signald mandate-add`` would only take effect after a daemon restart
+        (the poll loop reuses one ``Mandate`` object). Fail closed: a file that
+        no longer parses keeps the loaded mandate, and that failure is audited
+        and paged once per distinct reason rather than on every poll.
+        """
+        path = Path(self.cfg.mandate_path)
+        try:
+            st = path.stat()
+        except OSError as exc:
+            return self._reload_failed(f"{path}: {exc}")
+        stamp = (st.st_mtime_ns, st.st_size)
+        if stamp == self._mandate_stamp:
+            return "unchanged"
+        try:
+            fresh = load_mandate(path)
+        except MandateError as exc:
+            return self._reload_failed(str(exc))
+        if fresh.hash == self._mandate_hash:
+            self._mandate_stamp = stamp
+            return "unchanged"
+        previous, self.mandate = self._mandate_hash, fresh
+        self._mandate_hash = fresh.hash
+        self._mandate_stamp = stamp
+        self._reload_failure = None
+        self.audit.append("mandate_reloaded", f"mandate {fresh.id} re-signed",
+                          old_hash=previous, new_hash=fresh.hash,
+                          allowed=sorted(fresh.allowed))
+        return "reloaded"
+
+    def _reload_failed(self, detail: str) -> str:
+        if detail != self._reload_failure:
+            self._reload_failure = detail
+            self.audit.append("mandate_reload_failed", detail,
+                              path=str(self.cfg.mandate_path))
+            self._notify_error("mandate_reload_failed", detail)
+        return "invalid"
 
     def _notify_error(self, source: str, detail: str) -> None:
         if self.notifier.enabled:

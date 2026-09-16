@@ -100,18 +100,50 @@ class Journal:
     def _append(self, row: dict[str, Any]) -> None:
         _atomic_append(self.path, json.dumps(row, sort_keys=True) + "\n")
 
-    def mark_processed(self, decision_hash: str, ticker: str, path: str) -> None:
-        self._append({
+    def mark_processed(
+        self,
+        decision_hash: str,
+        ticker: str,
+        path: str,
+        *,
+        outcome: str = "emitted",
+        mandate_hash: str | None = None,
+    ) -> None:
+        """Record a handled decision.
+
+        ``mandate_hash`` is written only for *refusals* (``outcome="blocked"``):
+        that makes the row expire when the mandate changes, so a deliberate
+        widening re-opens the artifact exactly once. Emissions deliberately
+        carry no mandate hash - a mandate edit must never replay a signal.
+        """
+        row: dict[str, Any] = {
             "type": "processed",
             "decision_hash": decision_hash,
             "ticker": ticker,
             "path": path,
+            "outcome": outcome,
             "at": self._now().isoformat(timespec="seconds"),
-        })
+        }
+        if mandate_hash is not None:
+            row["mandate_hash"] = mandate_hash
+        self._append(row)
 
-    def is_processed(self, decision_hash: str) -> bool:
-        return any(r.get("type") == "processed" and r.get("decision_hash") == decision_hash
-                   for r in self._rows())
+    def is_processed(self, decision_hash: str, *, mandate_hash: str | None = None) -> bool:
+        """Has this decision already been handled under a mandate that applies?
+
+        A row without ``mandate_hash`` - an emission, or a journal written before
+        this field existed - always suppresses. A refusal row suppresses only
+        while the mandate hash still matches, which is what lets an operator
+        widen the mandate and have the refused artifact re-evaluated on the next
+        poll instead of hand-pruning this file.
+        """
+        for r in self._rows():
+            if r.get("type") != "processed" or r.get("decision_hash") != decision_hash:
+                continue
+            recorded = r.get("mandate_hash")
+            if recorded is None or mandate_hash is None or recorded == mandate_hash:
+                return True
+        return False
 
     def add_signal(self, envelope: dict[str, Any]) -> None:
         self._append({
@@ -208,6 +240,73 @@ class AuditChain:
                 return False, i, f"row {i} hash/prev mismatch (declared {declared!r} vs {expect!r})"
             prev = declared or ""
         return True, -1, f"{len(rows)} rows chained"
+
+
+class CandidateStore:
+    """Mandate candidates: names the research layer likes but the mandate bars.
+
+    Option A (design decision 2026-09-15): the executor never widens its own
+    mandate. When a valid decision carries a strong rating (Buy/Overweight) for a
+    symbol the mandate does not list *and the account provably does not hold*,
+    the processor records it here and pages the operator with the exact command
+    that promotes it (``signald mandate-add``). Tradability changes only when a
+    human runs that command.
+
+    Append-only JSONL under the data dir; the 10 s poll re-discovers artifacts,
+    so a (ticker, decision_hash) pair is recorded only once.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def _rows(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        rows = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return rows
+
+    def has(self, ticker: str, decision_hash: str) -> bool:
+        t = str(ticker).upper()
+        return any(r.get("ticker") == t and r.get("decision_hash") == decision_hash
+                   for r in self._rows())
+
+    def record(
+        self,
+        *,
+        ticker: str,
+        rating: str,
+        action: str,
+        decision_hash: str,
+        target_pct: float | None = None,
+        stop: float | None = None,
+        run_id: str | None = None,
+        at: str,
+    ) -> dict[str, Any]:
+        """Append one candidate row; idempotent per (ticker, decision_hash)."""
+        row: dict[str, Any] = {
+            "type": "candidate",
+            "ticker": str(ticker).upper(),
+            "rating": str(rating),
+            "action": str(action),
+            "decision_hash": decision_hash,
+            "target_pct": target_pct,
+            "stop": stop,
+            "run_id": run_id,
+            "at": at,
+        }
+        _atomic_append(self.path, json.dumps(row, sort_keys=True) + "\n")
+        return row
+
+    def read_all(self) -> list[dict[str, Any]]:
+        return self._rows()
 
 
 def _parse_ts(v: Any) -> datetime | None:

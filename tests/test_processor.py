@@ -42,6 +42,129 @@ def test_duplicate_artifact_skipped(processor, write_artifact, cfg):
     assert len(store.read_all()) == 1
 
 
+def test_a_blocked_artifact_is_refused_once(processor, write_artifact, transport_state,
+                                            cfg, webhook_events):
+    """A durable refusal is recorded once: one row, one page - not one per poll.
+
+    2026-09-15: an artifact the mandate forbids (NFLX) sits in the reports watch
+    tree, which the daemon re-discovers every 10 s. Before the journal wrote
+    refusals, that was a rejected audit row plus a Discord error card per cycle
+    (4 rows and 4 cards in 44 s of live running).
+    """
+    transport_state["account"]["cash"] = 1000.0  # below the 25k reserve
+
+    path = write_artifact(build_sample())
+    assert processor.process(path).kind == "blocked"
+    assert processor.process(path).kind == "skipped_duplicate"
+
+    audit = AuditChain(cfg.audit_file, cfg.now)
+    assert len([r for r in audit.read() if r["kind"] == "rejected"]) == 1
+    assert len([e for e in webhook_events if e["event"] == "error"]) == 1
+    store = SignalStore(cfg.data_dir / "signals.jsonl", cfg.data_dir / "latest.json")
+    assert store.read_all() == []
+
+
+def _candidates(cfg):
+    from signald.stores import CandidateStore
+
+    return CandidateStore(cfg.data_dir / "mandate_candidates.jsonl")
+
+
+def test_a_not_held_buy_outside_the_mandate_is_queued_as_a_candidate(
+    processor, write_artifact, cfg, transport_state, webhook_events
+):
+    """Option A (2026-09-15): research proposes, the operator promotes.
+
+    A valid Buy for a name the mandate does not list and the account does not
+    hold becomes a candidate plus one card carrying the promotion command -
+    instead of a bare refusal error.
+    """
+    transport_state["positions"] = {"positions_value": 0.0, "symbols": []}
+    path = write_artifact(build_sample(ticker="NFLX", direction=None, rating="Buy"))
+
+    assert processor.process(path).kind == "blocked"
+
+    rows = _candidates(cfg).read_all()
+    assert [(r["ticker"], r["rating"], r["action"]) for r in rows] == [("NFLX", "Buy", "BUY")]
+    cards = [e for e in webhook_events if e["event"] == "mandate_candidate"]
+    assert len(cards) == 1 and cards[0]["command"] == "signald mandate-add NFLX"
+    assert not [e for e in webhook_events if e.get("source") == "signal_blocked"]
+
+    assert processor.process(path).kind == "skipped_duplicate"
+    assert len(_candidates(cfg).read_all()) == 1
+
+
+def test_a_held_buy_outside_the_mandate_is_not_a_candidate(
+    processor, write_artifact, cfg, transport_state, webhook_events
+):
+    transport_state["positions"] = {"positions_value": 500.0, "symbols": ["NFLX"]}
+
+    res = processor.process(write_artifact(build_sample(ticker="NFLX", direction=None, rating="Buy")))
+
+    assert res.kind == "blocked"
+    assert not _candidates(cfg).read_all()
+    assert [e["source"] for e in webhook_events if e["event"] == "error"] == ["signal_blocked"]
+
+
+def test_unknown_holdings_do_not_make_a_candidate(processor, write_artifact, cfg, webhook_events):
+    """The default seam reports no per-symbol detail: not proof, so no offer."""
+    res = processor.process(write_artifact(build_sample(ticker="NFLX", direction=None, rating="Buy")))
+
+    assert res.kind == "blocked"
+    assert not _candidates(cfg).read_all()
+    assert [e["source"] for e in webhook_events if e["event"] == "error"] == ["signal_blocked"]
+
+
+def test_a_weak_rating_outside_the_mandate_is_not_a_candidate(
+    processor, write_artifact, cfg, transport_state
+):
+    transport_state["positions"] = {"positions_value": 0.0, "symbols": []}
+
+    doc = build_sample(ticker="NFLX", direction=None, rating="Underweight")
+    assert processor.process(write_artifact(doc)).kind == "blocked"
+    assert not _candidates(cfg).read_all()
+
+
+def test_a_mandate_add_reopens_a_refused_artifact(processor, write_artifact, cfg):
+    """The refusal row expires with the mandate, so `mandate-add` alone revives it."""
+    import json
+
+    from signald.mandate import write_mandate
+
+    path = write_artifact(build_sample(ticker="NFLX", direction=None, rating="Buy"))
+    assert processor.process(path).kind == "blocked"
+
+    doc = json.loads(cfg.mandate_path.read_text(encoding="utf-8"))
+    doc["symbols"]["allowed"] = sorted(set(doc["symbols"]["allowed"]) | {"NFLX"})
+    write_mandate(cfg.mandate_path, doc)
+
+    assert processor.refresh_mandate() == "reloaded"
+    assert processor.process(path).kind == "emitted"
+
+
+def test_a_broken_mandate_edit_keeps_the_loaded_one(processor, write_artifact, cfg):
+    """Fail closed: an unparseable mandate keeps the loaded one and pages once."""
+    cfg.mandate_path.write_text("{not json", encoding="utf-8")
+
+    assert processor.refresh_mandate() == "invalid"
+    assert processor.refresh_mandate() == "invalid"
+
+    audit = AuditChain(cfg.audit_file, cfg.now)
+    assert len([r for r in audit.read() if r["kind"] == "mandate_reload_failed"]) == 1
+    assert processor.process(write_artifact(build_sample())).kind == "emitted"
+
+
+def test_a_duplicate_artifact_does_not_grow_the_audit_ledger(processor, write_artifact, cfg):
+    """The ledger records decisions, not poll cycles: a re-seen artifact is silent."""
+    path = write_artifact(build_sample())
+    assert processor.process(path).kind == "emitted"
+
+    audit = AuditChain(cfg.audit_file, cfg.now)
+    before = len(audit.read())
+    assert processor.process(path).kind == "skipped_duplicate"
+    assert len(audit.read()) == before
+
+
 def test_restart_recovery_no_duplicate(processor, cfg, write_artifact):
     """Kill and rebuild the daemon: journal replay prevents double emission."""
     p = write_artifact(build_sample())

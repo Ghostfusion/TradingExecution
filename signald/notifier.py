@@ -118,8 +118,55 @@ class Notifier:
                             "description": env.get("decision_hash", ""),
                             "fields": fields}],
             }
+        if kind == "mandate_candidate":
+            ticker = event.get("ticker", "?")
+            content = (
+                f"🟡 {ticker} **{event.get('action', '?')}** — not in the mandate and "
+                f"not held. Promote it with:\n`signald mandate-add {ticker}`"
+            )
+            fields = []
+            for key, label in (("rating", "rating"), ("target_pct", "target %"),
+                               ("stop", "stop"), ("run_id", "run")):
+                v = event.get(key)
+                if v is not None:
+                    fields.append({"name": label, "value": str(v), "inline": True})
+            return {
+                "content": content,
+                "embeds": [{"title": f"{ticker} mandate candidate",
+                            "description": event.get("decision_hash", ""),
+                            "fields": fields}],
+            }
         detail = event.get("detail") or event.get("reason") or event.get("source") or ""
         return {"content": f"{kind}: {detail}"}
+
+    def mandate_candidate_event(
+        self,
+        *,
+        ticker: str,
+        action: str,
+        rating: str,
+        decision_hash: str,
+        target_pct: float | None = None,
+        stop: float | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """A strongly-rated, not-held name the mandate bars (option A: queue it).
+
+        The operator promotes it explicitly with the printed command; the
+        executor never widens its own mandate.
+        """
+        return {
+            "event": "mandate_candidate",
+            "ts": self._now().isoformat(timespec="seconds"),
+            "ticker": str(ticker).upper(),
+            "action": action,
+            "rating": rating,
+            "decision_hash": decision_hash,
+            "target_pct": target_pct,
+            "stop": stop,
+            "run_id": run_id,
+            "command": f"signald mandate-add {str(ticker).upper()}",
+        }
 
     def error_event(self, source: str, detail: str) -> dict[str, Any]:
         return {"event": "error", "ts": self._now().isoformat(timespec="seconds"),

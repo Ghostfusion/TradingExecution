@@ -98,6 +98,11 @@ class GateContext:
     last_signal: dict[str, Any] | None = None
     cooldown_hours: float = 12.0
     action: str | None = None
+    #: Symbols the account is known to hold at signal stage, from the reference
+    #: snapshot. ``None`` means holdings are unknown: the held-name exemption in
+    #: :func:`_mandate` then falls back to the book (which is authoritative at
+    #: order stage) and, failing that, refuses - "no data" is never a pass.
+    held_symbols: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -150,9 +155,27 @@ def _stage_kind(ctx: GateContext) -> str:
     return "reduce" if ctx.stage == "signal" else "block"
 
 
+def _reduces_a_held_name(ctx: GateContext) -> bool:
+    """True when this is a sell on a name the account provably holds.
+
+    The allow-list gates *entries*. Removing a symbol while still holding it
+    must not strand the position - the research EXIT/REDUCE path would otherwise
+    be blocked and only the position-driven protective stops would remain. The
+    proof must run both ways: a ``sell`` that would open a short is not exempt,
+    and unknown holdings are not proof, so they keep the block (fail closed).
+    """
+    req = ctx.request
+    if req.side != "sell" or req.implies_short():
+        return False
+    symbol = str(req.symbol).upper()
+    if ctx.held_symbols is not None:
+        return symbol in ctx.held_symbols
+    return ctx.book.position_for(symbol) > 0
+
+
 def _mandate(ctx: GateContext) -> Failure | None:
     req, cfg, book = ctx.request, ctx.config, ctx.book
-    if req.symbol not in ctx.mandate.allowed:
+    if req.symbol not in ctx.mandate.allowed and not _reduces_a_held_name(ctx):
         return Failure("mandate", "block", f"{req.symbol} not in mandate allowed set", "symbol")
     if ctx.mandate.is_expired(ctx.now):
         return Failure("mandate", "block", "mandate expired", "expired")

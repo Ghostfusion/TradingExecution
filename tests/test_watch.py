@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -94,3 +95,87 @@ def test_discover_empty_when_no_dir(cfg, seam):
     proc = _proc(cfg, seam)
     loop = WatchLoop(proc)
     assert loop.discover() == []
+
+
+# --- the scan window (2026-09-15: scan only while the regular session is open) ---
+OPEN = datetime(2026, 9, 15, 14, 0, tzinfo=UTC)                      # Tue 10:00 ET
+PRE_OPEN = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)                  # Tue 08:00 ET
+AFTER_CLOSE = datetime(2026, 9, 15, 21, 0, tzinfo=UTC)               # Tue 17:00 ET
+WEEKEND = datetime(2026, 9, 19, 14, 0, tzinfo=UTC)                   # Sat 10:00 ET
+HOLIDAY = datetime(2026, 11, 26, 15, 0, tzinfo=UTC)                  # Thanksgiving
+HALF_DAY_OPEN = datetime(2026, 11, 27, 16, 30, tzinfo=UTC)          # 11:30 ET (13:00 close)
+HALF_DAY_CLOSED = datetime(2026, 11, 27, 18, 30, tzinfo=UTC)        # 13:30 ET
+
+
+def _at(cfg, stamp, **overrides):
+    """The same config, pinned to an *aware* stamp (the window needs no host tz)."""
+    return Config(**{**cfg.__dict__, "now_fn": (lambda s=stamp: s), **overrides})
+
+
+@pytest.mark.parametrize(
+    ("stamp", "expected"),
+    [(OPEN, True), (PRE_OPEN, False), (AFTER_CLOSE, False), (WEEKEND, False),
+     (HOLIDAY, False), (HALF_DAY_OPEN, True), (HALF_DAY_CLOSED, False)],
+    ids=["rth", "pre", "post", "weekend", "holiday", "half-day-open", "half-day-closed"],
+)
+def test_the_scan_window_follows_the_regular_session(cfg, seam, stamp, expected):
+    """An ET fact (09:30-16:00, 13:00 half days) - the host clock's zone is irrelevant."""
+    assert WatchLoop(_proc(_at(cfg, stamp), seam)).scan_window().open is expected
+
+
+def test_the_closed_window_says_why(cfg, seam):
+    window = WatchLoop(_proc(_at(cfg, WEEKEND), seam)).scan_window()
+    assert window.reason == "closed" and "not scanning" in window.detail
+
+
+def test_an_unknown_broker_clock_does_not_scan(cfg, seam, transport_state):
+    """Fail closed: a calendar-open market with no broker confirmation waits."""
+    transport_state.pop("clock", None)
+    window = WatchLoop(_proc(_at(cfg, OPEN), seam)).scan_window()
+    assert not window.open and window.reason == "broker_unknown"
+
+
+def test_a_broker_closed_session_does_not_scan(cfg, seam, transport_state):
+    """The broker knows about halts and early closes the shipped calendar cannot."""
+    transport_state["clock"] = {"is_open": False}
+    window = WatchLoop(_proc(_at(cfg, OPEN), seam)).scan_window()
+    assert not window.open and window.reason == "broker_closed"
+
+
+def test_the_window_can_be_disabled_or_trusted_without_the_broker(cfg, seam, transport_state):
+    transport_state["clock"] = {"is_open": False}
+    assert WatchLoop(_proc(_at(cfg, AFTER_CLOSE, scan_rth_only=False), seam)).scan_window().open
+    trusted = WatchLoop(_proc(_at(cfg, OPEN, scan_confirm_broker_clock=False), seam)).scan_window()
+    assert trusted.open and trusted.reason == "rth"
+
+
+def _drive(loop, iterations):
+    """Run the loop for ``iterations`` cycles, counting the scans it performs."""
+    scans = []
+    loop.run_once = lambda: scans.append(1) or []
+    seen = {"n": 0}
+
+    def stop():
+        seen["n"] += 1
+        return seen["n"] > iterations
+
+    loop.run_forever(stop=stop)
+    return scans
+
+
+def test_run_forever_does_not_scan_outside_the_session(cfg, seam):
+    cfg = _at(cfg, AFTER_CLOSE)
+    assert _drive(WatchLoop(_proc(cfg, seam), poll_seconds=0.01), 3) == []
+    # Idle, not dead: the watchdog must still find a fresh heartbeat.
+    assert Path(cfg.heartbeat_path).exists()
+
+
+def test_run_forever_scans_inside_the_session(cfg, seam):
+    assert len(_drive(WatchLoop(_proc(_at(cfg, OPEN), seam), poll_seconds=0.01), 2)) == 2
+
+
+def test_run_once_ignores_the_window_for_the_operator(cfg, seam):
+    """`signald run --once` is the override: it scans whenever the operator says."""
+    cfg = _at(cfg, AFTER_CLOSE)
+    _write_decision(cfg.watch_dir, "AVGO", time.time())
+    assert [r.kind for r in WatchLoop(_proc(cfg, seam)).run_once()] == ["emitted"]

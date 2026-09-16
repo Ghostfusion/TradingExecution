@@ -38,6 +38,13 @@ class RefData:
     market_open: bool | None = None
     asset_tradable: bool | None = None
     positions_value: float | None = None
+    #: Symbols the account holds, or None when holdings are unknown. Deliberately
+    #: NOT part of :meth:`as_dict`: the envelope's ``ref`` block is a price record
+    #: (consumed by the web dashboard and the v2 schema) and account composition
+    #: does not belong in it. ``None`` (unknown) is distinct from ``frozenset()``
+    #: (confirmed flat): both the candidate rule and the gate's held-name
+    #: exemption demand positive proof, so "no data" never reads as "flat".
+    held_symbols: frozenset[str] | None = None
 
     @property
     def complete_for_gates(self) -> bool:
@@ -172,10 +179,31 @@ class AlpacaReference:
                 return {"tradable": bool(getattr(asset, "tradable", None))}
             if method == "positions":
                 pos = trade_client.get_all_positions()
-                return {"positions_value": round(sum(_num(p.market_value) or 0.0 for p in pos), 2)}
+                return {
+                    "positions_value": round(sum(_num(p.market_value) or 0.0 for p in pos), 2),
+                    # The per-symbol detail was fetched and then discarded into a
+                    # sum; the candidate rule ("a name I do not hold") and the
+                    # mandate's held-name exemption both need it.
+                    "symbols": sorted({str(p.symbol).upper() for p in pos}),
+                }
         except Exception as exc:  # noqa: BLE001 - any broker error is a failure path
             raise ReferenceUnavailable(f"alpaca {method} failed: {exc}") from exc
         raise ReferenceUnavailable(f"unknown reference method: {method}")
+
+    def clock_is_open(self) -> bool | None:
+        """Broker session state for the scan window; ``None`` when unavailable.
+
+        The broker knows about unscheduled halts and early closes that the
+        code-shipped calendar cannot, so the scan gate prefers its answer. Never
+        raises: the caller decides what an unknown clock means (today: do not
+        scan), so a broker hiccup cannot kill the poll loop.
+        """
+        try:
+            out = self._call("clock", "")
+        except ReferenceUnavailable:
+            return None
+        value = out.get("is_open")
+        return None if value is None else bool(value)
 
     def snapshot(self, ticker: str) -> RefData:
         """Fetch all reference inputs for a ticker; raises ReferenceUnavailable on any failure."""
@@ -205,6 +233,10 @@ class AlpacaReference:
                 bool(asset.get("tradable")) if asset.get("tradable") is not None else None
             ),
             positions_value=_num(positions.get("positions_value")),
+            held_symbols=(
+                None if positions.get("symbols") is None
+                else frozenset(str(s).upper() for s in positions["symbols"])
+            ),
         )
 
 

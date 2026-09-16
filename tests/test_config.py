@@ -25,6 +25,27 @@ def test_env_file_alias_mapping(tmp_path, monkeypatch):
     assert cfg.alpaca_paper is True
 
 
+def test_the_daemon_clock_is_naive_utc_not_host_local():
+    """2026-09-15: `now_utc()` returned `datetime.now()` - host-local, mislabelled.
+
+    Every age computation reads a naive stamp as UTC, so on the operator's
+    US-Central box the daemon clock ran 5 h off: a five-hour-old quote looked
+    fresh, which disabled the quote-age staleness check outright.
+    """
+    from datetime import UTC, datetime
+
+    from signald.config import now_utc
+
+    stamp = now_utc()
+    assert stamp.tzinfo is None, "the convention is naive (tz-free)"
+    assert abs((datetime.now(UTC).replace(tzinfo=None) - stamp).total_seconds()) < 2
+
+    # ...and it must be UTC, not whatever the host happens to be set to.
+    offset = abs(datetime.now().astimezone().utcoffset().total_seconds())
+    observed = abs((datetime.now() - stamp).total_seconds())
+    assert observed == pytest.approx(offset, abs=2)
+
+
 def test_the_research_repo_env_alias_is_rejected(tmp_path, monkeypatch):
     """Boundary rule (design §2.2 rule 3): execution owns its keys.
 
@@ -83,9 +104,38 @@ def test_v2_keys_load_from_the_environment(tmp_path):
     assert cfg.data_feed == "iex"
 
 
+def test_the_control_api_key_id_is_read_as_its_own_field(tmp_path):
+    """`TRADINGEXEC_API_KEY_ID` is the control API's key, not `ALPACA_API_KEY_ID`.
+
+    The alias table exists for Alpaca's names, so it must not rewrite our own
+    (the control API silently came up keyless before this).
+    """
+    cfg = load_config(
+        env_file=tmp_path / "absent.env",
+        environ={"TRADINGEXEC_API_KEY_ID": "op-1", "TRADINGEXEC_API_SIGNING_SECRET": "s1"},
+    )
+
+    assert cfg.api_key_id == "op-1" and cfg.api_signing_secret == "s1"
+    assert cfg.alpaca_key is None
+
+
 def test_signal_mode_has_no_order_path(tmp_path):
-    cfg = load_config(env_file=tmp_path / "absent.env", environ={})
+    cfg = load_config(env_file=tmp_path / "absent.env", environ={"TRADINGEXEC_MODE": "signal"})
     assert cfg.mode == "signal" and not cfg.order_path_enabled and not cfg.live
+
+
+def test_every_built_switch_defaults_on(tmp_path):
+    """Owner decision 2026-09-13: the four switches ship ON (.env sets them too).
+
+    Reachable is not sent: the order path still needs the caller's execute=True,
+    `live` needs its second opt-in, and the intraday router needs the caller's
+    `enabled` on top of the config flag.
+    """
+    cfg = load_config(env_file=tmp_path / "absent.env", environ={})
+    assert cfg.mode == "paper" and cfg.order_path_enabled and not cfg.live
+    assert cfg.intraday_enabled is True
+    assert cfg.api_enabled is True
+    assert cfg.mcp_enabled is True
 
 
 @pytest.mark.parametrize(

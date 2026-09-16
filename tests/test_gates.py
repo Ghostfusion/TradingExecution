@@ -72,6 +72,43 @@ def test_symbol_not_allowed_blocks(mandate):
     assert any("not in mandate" in r for r in g.blocked)
 
 
+def test_an_out_of_mandate_reduce_on_a_held_name_is_permitted(mandate):
+    """The allow-list gates entries; removing a held symbol must not strand it."""
+    rd, contract, state = _components(mandate, _doc(ticker="ZZZZ", direction="reduce"))
+    g = evaluate(rd, contract, mandate, _ref(held_symbols=frozenset({"ZZZZ"})), state, NOW)
+    assert g.blocked == ()
+    assert g.verdict in {"PASS", "DOWNGRADE"}
+
+
+def test_an_out_of_mandate_buy_is_blocked_even_with_known_holdings(mandate):
+    """The exemption is for risk-reducing intents only - a buy is a new entry."""
+    rd, contract, state = _components(mandate, _doc(ticker="ZZZZ", direction="buy"))
+    g = evaluate(rd, contract, mandate, _ref(held_symbols=frozenset()), state, NOW)
+    assert g.verdict == "BLOCK"
+    assert any("not in mandate" in r for r in g.blocked)
+
+
+def test_an_out_of_mandate_reduce_with_unknown_holdings_stays_blocked(mandate):
+    """No holdings data is not proof of a position: fail closed."""
+    rd, contract, state = _components(mandate, _doc(ticker="ZZZZ", direction="reduce"))
+    g = evaluate(rd, contract, mandate, _ref(), state, NOW)
+    assert g.verdict == "BLOCK"
+    assert any("not in mandate" in r for r in g.blocked)
+
+
+def test_quote_age_is_measured_not_skewed_by_the_host_zone(mandate):
+    """A 30-minute-old quote reads as 30 minutes: naive stamps are UTC on both sides."""
+    from signald.config import Config
+    from signald.gates import build_context
+
+    rd, contract, state = _components(mandate)
+    ref = _ref(ts=NOW - timedelta(minutes=30), stale=False)
+
+    ctx = build_context(rd, contract, mandate, ref, state, NOW, Config())
+
+    assert ctx.market.quote_age_s == pytest.approx(1800, abs=1)
+
+
 def test_cash_below_reserve_blocks(mandate):
     rd, contract, state = _components(mandate)
     g = evaluate(rd, contract, mandate, _ref(cash=1000.0), state, NOW)

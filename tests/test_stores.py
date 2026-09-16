@@ -51,6 +51,29 @@ def test_journal_idempotency(tmp_path):
     assert not j.is_processed("h2")
 
 
+def test_a_refusal_row_expires_with_the_mandate(tmp_path):
+    """The row that makes a refusal idempotent must not outlive the mandate.
+
+    Otherwise an operator's ``signald mandate-add`` would need a hand-pruned
+    journal before the refused artifact could be re-evaluated.
+    """
+    j = Journal(tmp_path / "journal.jsonl", lambda: NOW)
+    j.mark_processed("h1", "NFLX", "/x", outcome="blocked", mandate_hash="m1")
+
+    assert j.is_processed("h1", mandate_hash="m1")
+    assert not j.is_processed("h1", mandate_hash="m2")
+
+
+def test_an_emission_is_never_reopened_by_a_mandate_change(tmp_path):
+    """Only refusals carry a mandate hash; a signal must never replay."""
+    j = Journal(tmp_path / "journal.jsonl", lambda: NOW)
+    j.mark_processed("h1", "AVGO", "/x")  # emitted: no mandate hash
+
+    assert j.is_processed("h1", mandate_hash="m1")
+    assert j.is_processed("h1", mandate_hash="anything-else")
+    assert j.is_processed("h1")
+
+
 def test_journal_signal_counts_and_cooldown(tmp_path):
     j = Journal(tmp_path / "journal.jsonl", lambda: NOW)
     env = {

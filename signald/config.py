@@ -13,7 +13,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, fields
-from datetime import datetime, time
+from datetime import UTC, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,16 @@ _SECRET_FIELDS = frozenset({"alpaca_key", "alpaca_secret", "api_signing_secret"}
 
 
 def now_utc() -> datetime:
-    return datetime.now()
+    """The daemon clock: naive UTC, matching the envelope convention.
+
+    Naive-UTC on purpose. `calendar.to_et`/`session_phase`, `alpaca_ref._parse_ts`
+    and `stores._parse_ts` all read a naive stamp as UTC, so a host-local clock
+    silently skewed every age computation by the host's offset - on the operator's
+    US-Central box (2026-09-15) that was 5 h, which made a 5-hour-old quote look
+    fresh and disabled the `market.quote_age_s` staleness check entirely. Keep
+    this tz-free and UTC; never `datetime.now()`.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 @dataclass(frozen=True)
@@ -77,7 +86,11 @@ class Config:
     # --- mode + sleeves (implementation plan §3) -------------------------
     # signal = no order path exists in this process; paper|live enable the
     # order path behind --execute; live additionally requires two opt-ins.
-    mode: str = "signal"
+    # Owner decision (2026-09-13): every built switch ships ON. The default is
+    # paper, so the gate, the sizer and the OrderGuard judge every candidate;
+    # `execute=True` (CLI `--execute`) stays an INDEPENDENT opt-in before any
+    # order is sent, and live still needs its second acknowledgement.
+    mode: str = "paper"
     sleeve_swing_capital_pct: float = 0.70
     sleeve_intraday_capital_pct: float = 0.30
     sleeve_swing_vol_target: float = 0.10
@@ -111,8 +124,23 @@ class Config:
     vol_rebalance_band: float = 0.12
     stress_correlation: float = 0.85
 
+    # --- scan window (the reports poll) ----------------------------------
+    # ON by default: the daemon only *scans* during the regular session, so an
+    # after-hours report waits for the next open instead of paging a "next
+    # session" card at 23:00. The session is an exchange fact, evaluated in ET
+    # (09:30-16:00, 13:00 on half days) - on a US-Central host that is
+    # 08:30-15:00 local, and the host clock's zone never enters the decision.
+    # `signald run --once` deliberately ignores this (operator override).
+    scan_rth_only: bool = True
+    # Cross-check the calendar against the broker's own clock, which knows about
+    # unscheduled halts and early closes the code-shipped calendar cannot.
+    # Unavailable clock => do not scan (fail closed); set False to run offline.
+    scan_confirm_broker_clock: bool = True
     # --- intraday sleeve -------------------------------------------------
-    intraday_enabled: bool = False
+    # ON by default (owner decision 2026-09-13). This is one of the two
+    # opt-ins `route_intraday` requires - the caller still has to pass
+    # `enabled=True` - and the session engine still needs `execute=True`.
+    intraday_enabled: bool = True
     intraday_entry_after: str = "09:35"
     intraday_entry_before: str = "11:00"
     intraday_flat_by: str = "15:50"
@@ -138,13 +166,19 @@ class Config:
     clock_max_offset_ms: float = 50.0
 
     # --- control API / MCP ----------------------------------------------
-    api_enabled: bool = False
+    # ON by default (owner decision 2026-09-13). `signald api` / `signald mcp`
+    # (`signald/control.py`) serve them; the API additionally needs the key id
+    # and signing secret below, and both refuse a non-loopback bind before any
+    # socket exists. MCP mutating tools are absent unless listed in
+    # `mcp_toolsets`. A patch flag is still not a listener: nothing is bound
+    # until one of those commands runs.
+    api_enabled: bool = True
     api_bind: str = "127.0.0.1:8787"
     api_key_id: str | None = None
     api_signing_secret: str | None = None
     api_replay_window_s: float = 300.0
     approval_ttl_s: float = 900.0
-    mcp_enabled: bool = False
+    mcp_enabled: bool = True
     mcp_bind: str = "127.0.0.1"
     mcp_toolsets: str = "read,simulate,propose"
 
@@ -266,10 +300,15 @@ def load_config(
     field_names = {f.name for f in fields(Config)}
     mapped: dict[str, Any] = {}
     for k, v in values.items():
-        key = next((p for p in _PREFIXES if k.startswith(p)), k)
-        key = k[len(key):]
-        key = key.lower()
-        key = _ALIASES.get(key, key)
+        prefix = next((p for p in _PREFIXES if k.startswith(p)), None)
+        if prefix is None:
+            continue  # only our own prefixes are read (design §2.2 rule 3)
+        key = k[len(prefix):].lower()
+        # The alias table translates *Alpaca's* env names onto our fields, so it
+        # applies to the ALPACA_ prefix only: TRADINGEXEC_API_KEY_ID is the
+        # control API's key id, not ALPACA_API_KEY_ID (which is the Alpaca one).
+        if prefix == _ALPACA_PREFIX:
+            key = _ALIASES.get(key, key)
         if key not in field_names:
             continue
         f = next(x for x in fields(Config) if x.name == key)

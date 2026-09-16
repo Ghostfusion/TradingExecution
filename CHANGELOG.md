@@ -2,6 +2,155 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-15 (c) — the daemon scans only in the regular session, and the clock is UTC again
+
+Owner request: *"make sure signald only scans during the stock market open."* The poll loop now honours
+a **scan window**, and implementing it surfaced a timezone defect affecting every age computation.
+
+- **Scan window** (`watch.WatchLoop.scan_window` + `run_forever`): with `scan_rth_only` (default ON) the
+  daemon processes nothing outside the regular session - 09:30-16:00 ET on trading days, 13:00 on half
+  days, no weekends or holidays (`marketdata.calendar`, which ships the 2026-2027 calendar and the DST
+  rules). The window is an **exchange** fact in ET, so the host's zone never enters the decision: on this
+  US-Central box the session is 08:30-15:00 local. With `scan_confirm_broker_clock` (default ON) the
+  calendar is cross-checked against the broker's own clock, which knows about unscheduled halts and
+  early closes the shipped calendar cannot; an unavailable clock means *do not scan* (fail closed). Each
+  phase change is announced once, not every poll. `signald run --once` ignores the window on purpose -
+  that is the operator override.
+- **One loop, one behaviour**: `signald run` used to inline its own poll loop, so the window (or
+  anything else added to `run_forever`) would have been inert; the CLI now calls
+  `WatchLoop.run_forever`. The heartbeat is touched *before* the window check, so a closed market never
+  looks like a dead daemon to `signald watchdog`.
+- **The daemon clock is UTC again** (`config.now_utc`): it returned `datetime.now()` - host-local time
+  under a UTC name - while `calendar`, `alpaca_ref._parse_ts` and `stores._parse_ts` all read a naive
+  stamp as UTC. On this host that skewed every age by 5 h: a five-hour-old quote looked fresh, which
+  disabled the `market.quote_age_s` staleness check. `gates._quote_age_s` normalises both sides to
+  UTC-aware as well, so an aware injected clock can no longer raise `TypeError` (it did).
+- **Config**: `scan_rth_only` / `scan_confirm_broker_clock`, both ON by default per the owner's
+  "every built switch ships ON" decision (2026-09-13); the `run` banner prints the active policy.
+
+Verified: **1102 hermetic tests green** (16 new: seven session cases, the broker-clock cross-check, the
+disabled/trusted variants, loop-level skip and scan, the `--once` override, and the clock + quote-age
+pins) and the live daemon prints `[scan] market post (… ET); not scanning` with a fresh heartbeat.
+
+## 2026-09-15 (b) — operator-driven mandate widening: candidates, `mandate-add` / `mandate-remove`
+
+Option A of the design question "how should a strongly-rated, not-held name reach execution?":
+**the executor never widens its own mandate.** When a *valid* decision carries `buy`/`overweight` for
+a symbol the mandate does not list *and the account provably does not hold*, the daemon queues a
+candidate (JSONL row + one Discord card carrying the exact promotion command) instead of paging a bare
+refusal. A human then runs `signald mandate-add <TICKER>`.
+
+- **`signald mandate-add SYMBOL` / `signald mandate-remove SYMBOL`** (`signald/cli.py`): both re-sign
+  through `write_mandate` (never hand-edit - the loader rejects an unsigned file), audit a
+  `mandate_added`/`mandate_removed` row naming the operator, and write provenance into the archive.
+  `add` is a no-op when the symbol is already allowed (no hash churn); `remove` refuses the last
+  symbol, and refuses a symbol you hold - or one whose holdings cannot be verified - unless `--force`,
+  because removal stops new entries and the gate can only exempt an exit it can prove.
+- **Candidate queue** (`signald/stores.py::CandidateStore`, `processor._offer_candidate`): append-only
+  `<data>/mandate_candidates.jsonl`, idempotent per (ticker, decision_hash). Unknown holdings are not
+  proof, so they keep the plain refusal (fail closed).
+- **Per-symbol holdings** (`alpaca_ref`): `get_all_positions()` was fetched and then collapsed into a
+  single `positions_value`; `RefData.held_symbols` now carries the symbol set (or `None` when unknown).
+  Deliberately absent from `RefData.as_dict()` - the envelope's `ref` block is a price record consumed
+  by the web dashboard and the v2 schema, so account composition stays out of it.
+- **The allow-list gates entries, not exits** (`risk/gate.py::_reduces_a_held_name`): a reduce/exit for
+  a symbol the account provably holds is no longer blocked by the symbol check. Removing a held name
+  used to strand its research exit path; now only a confirmed *open* short intent is refused, and
+  unknown holdings keep the block.
+- **Refusals expire with the mandate** (`stores.Journal`): only refusal rows carry `mandate_hash`, so
+  `mandate-add` re-opens a refused artifact exactly once. Emission rows carry none - a mandate edit
+  must never replay a signal. This replaces the hand-pruning of `journal.jsonl` that the entry below
+  had to document.
+- **The daemon reloads the mandate** (`watch.run_once` -> `processor.refresh_mandate`): the mandate was
+  read once at startup, so an operator change needed a restart. A changed file is now picked up on the
+  next poll and audited as `mandate_reloaded`; an unparseable edit keeps the loaded mandate and is
+  audited/paged once per distinct reason (fail closed, no per-poll spam).
+- **Atomic mandate write** (`mandate.write_mandate`): tmp + `os.replace` (the `kill_switch` idiom), with
+  the archive row carrying `actor/operator/reason/ticker`. The loader fails closed, so a torn file -
+  e.g. two batch workers writing at once - would have left the daemon unable to start.
+
+Verified: **1086 hermetic tests green** (20 new) and a live sandbox run (isolated mandate/data/env, no
+notifier, real paper reference): the artifact was refused once, queued as a candidate, promoted with
+`signald mandate-add NFLX`, hot-reloaded (`mandate_reloaded`) and emitted
+(`[emitted] NFLX BUY target_pct=0.03 signal_id=sg-…-001`) with no restart. Operator note: run the verbs
+with the same `--data` as the daemon so their audit rows land in the same ledger.
+
+## 2026-09-15 — first live daemon run: a refusal is recorded once, the ledger stops chaining poll noise
+
+The reports-tree daemon ran for real against TradingAgents' live `reports/` tree
+(`signald run --watch …/reports --data ./signals --execute`, `mode=paper`), fed by the research
+layer's first emitted artifact. Two defects surfaced in the first 44 seconds and are fixed here;
+`ALPACA_API_KEY`/`ALPACA_SECRET_KEY` (the same paper account the research repo reads) are now in
+`.env`, which the daemon requires before it will start.
+
+- **A refused artifact re-fired on every poll** (`signald/processor.py`). A gate `BLOCK` returned
+  without touching the journal, and `watch.discover()` re-discovers every artifact still sitting in
+  the tree, so one ineligible decision produced a `rejected` audit row **and a Discord error card
+  every 10 s** — measured: 4 rows and 4 cards in 44 s for `NFLX` (outside the mandate allow-list).
+  A refusal is a durable verdict on that artifact, so the blocked path now calls
+  `journal.mark_processed(...)` exactly like an emission: one row, one page, then silence.
+  Consequence: later polls do not re-evaluate a refusal — widening the mandate will not revive the
+  same artifact. Re-evaluation needs a new `decision_hash` (re-run the symbol) or pruning the
+  journal row (`<data>/audit/journal.jsonl`; the chained audit ledger is never touched).
+- **The duplicate skip grew the audit ledger without bound.** `process()` appended a
+  `skipped_duplicate` row on every poll cycle for every already-handled artifact (~8.6k rows/day
+  each, into a SHA-256 chained append-only ledger that cannot be pruned). The skip is now silent:
+  the ledger records decisions, not poll cycles.
+- **`signald verify` crashed without `--audit`** (`Path(None)`), on the one command an operator
+  needs to check the daemon's ledger. It now resolves the configured ledger the way `status` does,
+  and gained `--env`/`--data` (`--audit` stays the explicit override).
+
+Verified: **1066 hermetic tests green** (two new processor tests, one new CLI test), the ledger
+chains (`signald verify --data ./signals` → `OK — 5 rows chained`), and a restarted daemon shows
+`[blocked] NFLX …` once, then silent `[skipped_duplicate]` cycles with a live heartbeat.
+
+## 2026-09-13 (b) — control-surface launchers + hermetic test environment
+
+`signald api` and `signald mcp` now exist (`signald/control.py`): they build the signed control
+API / MCP surface with the seams this repo can honestly serve — a local-state snapshot (signals,
+pending orders, kill switch, config hash), `halt` (the same sentinel + episode latch + audit row
+as `signald halt`), and the MCP proposal/approval stores under `audit/`. Broker-backed reads
+(`account`/`positions`/`risk`/`sleeves`) answer `null`, and the order-path effects
+(`submit`/`cancel`/`ceiling`, MCP `submit_order`/`set_sleeve_allocation`) stay unwired, so those
+routes keep answering `503 api_disabled` / `*_unavailable` instead of half-wiring a flag. The API
+refuses to start without `TRADINGEXEC_API_KEY_ID` + `TRADINGEXEC_API_SIGNING_SECRET` (mapped to
+the `admin` role), and both launchers refuse a non-loopback bind before a socket exists.
+`cmd_halt` now shares `control.halt_now`, so CLI/API/MCP halts leave identical trail.
+Fixing the launcher exposed a config defect: the env alias table
+(`api_key_id` → `alpaca_key`) was applied to every prefix, so `TRADINGEXEC_API_KEY_ID` was
+silently read as the *Alpaca* key and the control API could never see its own key id. The
+aliases now apply to the `ALPACA_` prefix only (their purpose), and `tests/test_config.py` pins
+both sides.
+18 new tests (`tests/test_control.py`) drive both servers through their own wiring; no socket is
+opened.
+
+Test environment: the 12 failures that predated the switch flip are fixed at the root.
+`tests/conftest.py` strips ambient `TRADINGEXEC_*`/`ALPACA_*` from the process environment for
+every test — `load_config` prefers the shell over `--env`, so an exported
+`TRADINGEXEC_WATCH_DIR`/`TRADINGEXEC_NOTIFIER_URL` was silently redirecting the probe and
+notify-test CLI tests onto the operator's real tree. `tests/test_inbox.py` and
+`tests/test_order_manager.py` dated their artifacts and row expectations from a fixed past day
+and dead-lettered (or mismatched) once the wall clock moved past it; both now derive from the
+injected clock. **1063 hermetic tests green, ruff clean.**
+
+## 2026-09-13 — owner decision: every built switch ships ON
+
+`Config` defaults flipped: `mode` `signal` → `paper`, `intraday_enabled` `False` → `True`,
+`api_enabled` `False` → `True`, `mcp_enabled` `False` → `True`. The four switches are also set
+explicitly in `.env` (gitignored) and `.env.example` documents the new defaults.
+
+Nothing about the send gates moved: the order path is *reachable* by default, but the session
+engine still refuses to arm without `execute=True` (CLI `--execute`), `live` still needs its
+second acknowledgement, the intraday router still needs the caller's `enabled=True` on top of
+the config flag, and `api_enabled` / `mcp_enabled` gate the control surfaces on the loopback
+bind — nothing listens until `signald api` / `signald mcp` runs (added the same day, below).
+Live broker/market-data adapters remain unwritten. `cli.py`'s banner now prints the real
+`cfg.mode` (it printed the word `signal` for any non-dry-run process). Docs updated to match:
+`README.md`, `docs/USER_GUIDE.md` (§2, §8), `docs/AGENT_ONBOARDING.md`,
+`docs/INTRADAY_ALGO_IMPLEMENTATION.md` (§3 table, §8 phase gate),
+`docs/INTRADAY_ALGO_DESIGN.md`; `tests/test_config.py` pins the new defaults and the
+signal-mode property.
+
 ## 2026-09-12 (b) — two-sleeve intraday execution, phases P0–P6 implemented
 
 The design/plan entries below became code. 36 new modules, 34 new test files,

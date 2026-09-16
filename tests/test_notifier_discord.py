@@ -9,6 +9,23 @@ from signald.notifier import Notifier
 pytestmark = pytest.mark.timeout(120)
 
 
+def test_a_mandate_candidate_card_carries_the_promotion_command():
+    """Option A: the operator is told exactly how to widen the mandate."""
+    n = Notifier()
+    ev = n.mandate_candidate_event(
+        ticker="NFLX", action="BUY", rating="Buy", decision_hash="sha256:abc",
+        target_pct=0.03, stop=74.92, run_id="run-1",
+    )
+
+    d = n.discord_event(ev)
+
+    assert "signald mandate-add NFLX" in d["content"]
+    embeds = d["embeds"][0]
+    assert embeds["title"] == "NFLX mandate candidate"
+    labels = {f["name"] for f in embeds["fields"]}
+    assert {"rating", "target %", "stop"} <= labels
+
+
 def _signal_envelope():
     return {
         "signal_id": "sg-abc-001",

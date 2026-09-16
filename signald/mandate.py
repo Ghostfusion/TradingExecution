@@ -9,6 +9,7 @@ intents regardless of research.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -115,8 +116,18 @@ def load_mandate(path: str | Path) -> Mandate:
     return parse_mandate(raw)
 
 
-def write_mandate(path: str | Path, raw: dict[str, Any]) -> Mandate:
-    """Write a re-signed mandate (hash recomputed); archive the old one first."""
+def write_mandate(
+    path: str | Path, raw: dict[str, Any], *, provenance: dict[str, Any] | None = None
+) -> Mandate:
+    """Write a re-signed mandate (hash recomputed); archive the old one first.
+
+    The write is atomic (tmp + ``os.replace``, the idiom :mod:`kill_switch`
+    already uses) because the loader fails closed: a torn file - e.g. one batch
+    worker mid-write while another reads - would leave the daemon unable to
+    start. ``provenance`` (actor, operator, reason, ticker) is merged into the
+    archive row so a later reader can answer "why is this symbol tradable"
+    without guessing from hashes alone.
+    """
     p = Path(path)
     old_hash = None
     if p.exists():
@@ -127,10 +138,15 @@ def write_mandate(path: str | Path, raw: dict[str, Any]) -> Mandate:
             old_hash = None
     doc = {k: v for k, v in raw.items() if k != "hash"}
     doc["hash"] = sha256_of(doc)
-    p.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
     if old_hash and old_hash != doc["hash"]:
         archive = p.with_name(p.name + ".archive.jsonl")
+        row: dict[str, Any] = {"ts": datetime.now().isoformat(timespec="seconds"),
+                               "old_hash": old_hash, "new_hash": doc["hash"]}
+        row.update(provenance or {})
         with archive.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"ts": datetime.now().isoformat(timespec="seconds"),
-                                 "old_hash": old_hash, "new_hash": doc["hash"]}) + "\n")
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
     return parse_mandate(doc)

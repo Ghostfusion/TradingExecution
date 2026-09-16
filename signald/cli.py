@@ -2,20 +2,26 @@
 
 Exit codes: 0 ok, 1 runtime error, 2 usage, 3 already running.
 Default mode is DRY-RUN (logs what WOULD be emitted, writes nothing);
-``--execute`` opts into signal persistence. No order path exists in Phase A.
+``--execute`` opts into signal persistence. The config default mode is
+``paper`` (owner decision 2026-09-13), so the order path is *reachable*: the
+engine still refuses to arm without ``execute=True``, ``live`` still needs its
+second opt-in, and ``run`` below only ever emits and notifies signals.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from .alpaca_ref import AlpacaReference
+from .alpaca_ref import AlpacaReference, ReferenceUnavailable
 from .config import Config, load_config
-from .daemon import AlreadyRunning, DaemonLock, touch_heartbeat
-from .kill_switch import ensure_episode, is_halted, resume
+from .control import ControlSurfaceError, build_control_api, build_mcp_server, halt_now
+from .daemon import AlreadyRunning, DaemonLock
+from .kill_switch import is_halted, resume
 from .mandate import DEFAULT_MANDATE, MandateError, load_mandate, write_mandate
 from .notifier import Notifier
 from .processor import SignalProcessor
@@ -101,14 +107,19 @@ def cmd_run(args: argparse.Namespace) -> int:
                 for r in results:
                     print(f"[{r.kind}] {_describe(r)}")
                 return 0
-            print(f"signald {_now_str(cfg)} mode={'dry-run' if cfg.dry_run else 'signal'} "
-                  f"watch={cfg.watch_dir} (kill switch: {cfg.kill_switch_path})", flush=True)
-            while True:
-                touch_heartbeat(cfg.heartbeat_path)
-                for r in loop.run_once():
-                    print(f"[{r.kind}] {_describe(r)}", flush=True)
-                import time as _t
-                _t.sleep(cfg.poll_seconds)
+            scan = "rth-only 09:30-16:00 ET" if cfg.scan_rth_only else "always"
+            if cfg.scan_rth_only and cfg.scan_confirm_broker_clock:
+                scan += " + broker clock"
+            print(f"signald {_now_str(cfg)} mode={cfg.mode} dry_run={cfg.dry_run} "
+                  f"scan={scan} watch={cfg.watch_dir} (kill switch: {cfg.kill_switch_path})",
+                  flush=True)
+            # One loop, one behaviour: WatchLoop.run_forever owns the poll cadence,
+            # the heartbeat and the regular-session scan window (2026-09-15: the
+            # CLI used to inline a duplicate loop that ignored that window).
+            loop.run_forever(
+                on_result=lambda r: print(f"[{r.kind}] {_describe(r)}", flush=True)
+            )
+            return 0
     except AlreadyRunning as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
@@ -117,7 +128,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    audit = AuditChain(Path(args.audit), datetime.now)
+    # Bare `verify` built Path(None) and crashed; resolve the configured ledger
+    # the way `status` does, keeping --audit as the explicit override.
+    cfg = load_config(env_file=args.env, **_state_overrides(args))
+    audit = AuditChain(Path(args.audit) if args.audit else cfg.audit_file, cfg.now)
     ok, _idx, detail = audit.verify()
     print(f"{'OK' if ok else 'CORRUPT'} — {detail}")
     return 0 if ok else 1
@@ -173,6 +187,133 @@ def cmd_approve(args: argparse.Namespace) -> int:
                  signal_id=signal_id, operator=args.operator)
     print(f"recorded approval_{args.action} for {signal_id or 'unknown signal'} "
           "(execution gate lands in M1; Phase A emits signals only)")
+    return 0
+
+
+_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+def _symbol_arg(raw: str) -> str:
+    """Normalise and sanity-check a ticker from the command line (fail closed)."""
+    symbol = str(raw or "").strip().upper()
+    if not _SYMBOL_RE.match(symbol):
+        raise ValueError(f"{raw!r} is not a plausible US ticker")
+    return symbol
+
+
+def _holdings_precheck(cfg: Config, symbol: str) -> tuple[bool | None, str]:
+    """(held, detail) from the broker. ``held`` is None when holdings are unknown."""
+    reference = AlpacaReference(
+        api_key=cfg.alpaca_key, secret=cfg.alpaca_secret,
+        paper=cfg.alpaca_paper, transport=cfg.transport,
+    )
+    try:
+        snapshot = reference.snapshot(symbol)
+    except ReferenceUnavailable as exc:
+        return None, str(exc)
+    if snapshot.held_symbols is None:
+        return None, "the broker returned no position detail"
+    if symbol in snapshot.held_symbols:
+        return True, "you hold a position in it"
+    return False, "no position"
+
+
+def cmd_mandate_add(args: argparse.Namespace) -> int:
+    """Promote a symbol into the mandate (option A: the operator widens it, never research)."""
+    ov = _state_overrides(args)
+    if args.mandate:
+        ov["mandate_path"] = args.mandate
+    cfg = load_config(env_file=args.env, **ov)
+    try:
+        symbol = _symbol_arg(args.symbol)
+        mandate = load_mandate(cfg.mandate_path)
+    except (ValueError, MandateError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if symbol in mandate.allowed:
+        print(f"{symbol} is already allowed (no change, hash {mandate.hash[:12]}…)")
+        return 0
+    try:
+        doc = json.loads(Path(cfg.mandate_path).read_text(encoding="utf-8"))
+        doc["symbols"]["allowed"] = sorted(set(doc["symbols"]["allowed"]) | {symbol})
+        updated = write_mandate(
+            cfg.mandate_path, doc,
+            provenance={"actor": "operator", "action": "mandate_add", "ticker": symbol,
+                        "operator": args.operator, "reason": args.reason or ""},
+        )
+    except (OSError, MandateError, ValueError, KeyError, TypeError) as exc:
+        print(f"error: cannot re-sign the mandate: {exc}", file=sys.stderr)
+        return 1
+    AuditChain(cfg.audit_file, cfg.now).append(
+        "mandate_added", f"{symbol} added to the mandate",
+        ticker=symbol, operator=args.operator, why=args.reason or "",
+        old_hash=mandate.hash, new_hash=updated.hash,
+    )
+    print(f"mandate {updated.id}: added {symbol} ({mandate.hash[:12]}… -> "
+          f"{updated.hash[:12]}…) | allowed {sorted(updated.allowed)}")
+    print("a running daemon picks this up on its next poll; artifacts already refused "
+          f"for {symbol} are re-evaluated once")
+    return 0
+
+
+def cmd_mandate_remove(args: argparse.Namespace) -> int:
+    """Drop a symbol from the mandate, guarding a position you still hold."""
+    ov = _state_overrides(args)
+    if args.mandate:
+        ov["mandate_path"] = args.mandate
+    cfg = load_config(env_file=args.env, **ov)
+    try:
+        symbol = _symbol_arg(args.symbol)
+        mandate = load_mandate(cfg.mandate_path)
+    except (ValueError, MandateError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if symbol not in mandate.allowed:
+        print(f"{symbol} is not in the mandate (no change, hash {mandate.hash[:12]}…)")
+        return 0
+    if len(mandate.allowed) <= 1:
+        print("error: symbols.allowed must stay a non-empty list", file=sys.stderr)
+        return 1
+    held, detail = _holdings_precheck(cfg, symbol)
+    if held is None and not args.force:
+        print(f"error: cannot verify holdings ({detail}); pass --force to remove "
+              f"{symbol} anyway - without holdings data the gate cannot exempt a "
+              "held name's reduce/exit, so a live position would be stranded",
+              file=sys.stderr)
+        return 1
+    if held and not args.force:
+        print(f"error: {symbol} is in your positions ({detail}); removing it stops new "
+              f"entries. Pass --force to remove it anyway.", file=sys.stderr)
+        return 1
+    try:
+        doc = json.loads(Path(cfg.mandate_path).read_text(encoding="utf-8"))
+        doc["symbols"]["allowed"] = [
+            s for s in doc["symbols"]["allowed"] if str(s).upper() != symbol
+        ]
+        updated = write_mandate(
+            cfg.mandate_path, doc,
+            provenance={"actor": "operator", "action": "mandate_remove", "ticker": symbol,
+                        "operator": args.operator, "reason": args.reason or "",
+                        "held": held},
+        )
+    except (OSError, MandateError, ValueError, KeyError, TypeError) as exc:
+        print(f"error: cannot re-sign the mandate: {exc}", file=sys.stderr)
+        return 1
+    AuditChain(cfg.audit_file, cfg.now).append(
+        "mandate_removed", f"{symbol} removed from the mandate",
+        ticker=symbol, operator=args.operator, why=args.reason or "",
+        held=held, old_hash=mandate.hash, new_hash=updated.hash,
+    )
+    print(f"mandate {updated.id}: removed {symbol} ({mandate.hash[:12]}… -> "
+          f"{updated.hash[:12]}…) | allowed {sorted(updated.allowed)}")
+    if held:
+        print(f"warning: {symbol} is still held - a reduce/exit for it is exempt from "
+              "the allow-list while the position shows at the broker, but a sell "
+              "cannot open a short and the name no longer accepts entries")
+    elif held is None:
+        print(f"warning: holdings could not be verified; if {symbol} is actually held, "
+              "its reduce/exit signal stays blocked (the gate will not exempt what it "
+              "cannot prove)")
     return 0
 
 
@@ -411,13 +552,66 @@ def cmd_halt(args: argparse.Namespace) -> int:
         print(f"kill switch cleared; episode retained at {cfg.halt_latch_path}. "
               "Size restores in steps (25/50/100%) per plan §11.3.")
         return 0
-    Path(cfg.kill_switch_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(cfg.kill_switch_path).write_text(
-        f"halted by {args.operator} at {_now_str(cfg)}\n", encoding="utf-8"
-    )
-    ep = ensure_episode(cfg.halt_latch_path, cfg.now())
-    audit.append("kill_switch", f"manual halt by {args.operator}", episode=ep["episode"])
+    ep = halt_now(cfg, operator=args.operator, action="manual halt")
     print(f"HALTED episode {ep['episode']} since {ep['since']} (sentinel {cfg.kill_switch_path})")
+    return 0
+
+
+def cmd_api(args: argparse.Namespace) -> int:
+    """Serve the signed control API on the loopback bind (plan §7.1, §12.4).
+
+    Read + halt are wired; every order-path route answers 503 ``api_disabled``
+    (no broker adapter yet). Refuses to start when the switch is off or the
+    signing key is incomplete.
+    """
+    ov = _state_overrides(args)
+    if args.bind:
+        ov["api_bind"] = args.bind
+    cfg = load_config(env_file=args.env, **ov)
+    try:
+        api = build_control_api(cfg)
+    except ControlSurfaceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"signald api {_now_str(cfg)} mode={cfg.mode} bind={cfg.api_bind} "
+        f"key_id={cfg.api_key_id} (read+halt; order-path routes 503)",
+        flush=True,
+    )
+    try:
+        api.serve()
+    except ValueError as exc:  # a non-loopback bind, refused before any socket
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Serve the MCP surface (JSON-RPC over HTTP) on the loopback bind (plan §7.3).
+
+    Read + halt + the proposal/approval stores are wired; a gate verdict and the
+    order-path effects are not (no broker adapter yet), so those tools answer
+    ``*_unavailable``. Refuses to start when the switch is off.
+    """
+    ov = _state_overrides(args)
+    if args.bind:
+        ov["mcp_bind"] = args.bind
+    cfg = load_config(env_file=args.env, **ov)
+    try:
+        server = build_mcp_server(cfg)
+    except ControlSurfaceError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"signald mcp {_now_str(cfg)} mode={cfg.mode} bind={cfg.mcp_bind} "
+        f"toolsets={cfg.mcp_toolsets} (read+halt; gate/order effects unavailable)",
+        flush=True,
+    )
+    try:
+        server.serve(bind=cfg.mcp_bind)
+    except ValueError as exc:  # a non-loopback bind, refused before any socket
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -521,7 +715,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=cmd_run)
 
     v = sub.add_parser("verify", help="verify the audit chain (SHA-256)")
-    v.add_argument("--audit", default=None, help="audit file path")
+    v.add_argument("--audit", default=None,
+                   help="audit file path (default: the configured ledger)")
+    v.add_argument("--env", help=".env file path")
+    v.add_argument("--data", help="signals output directory")
     v.set_defaults(func=cmd_verify)
 
     st = sub.add_parser("status", help="journal/signal/audit summary")
@@ -559,6 +756,29 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--operator", default="vince")
     ap.add_argument("--env")
     ap.set_defaults(func=cmd_approve)
+
+    ma = sub.add_parser("mandate-add", help="add a symbol to the signed mandate (re-signs)")
+    ma.add_argument("symbol")
+    ma.add_argument("--operator", default="vince")
+    ma.add_argument("--reason", default="", help="why (recorded in the archive row)")
+    ma.add_argument("--mandate", default=None, help="mandate JSON path (overrides env/default)")
+    ma.add_argument("--env")
+    ma.add_argument("--data", help="signals output directory")
+    ma.set_defaults(func=cmd_mandate_add)
+
+    mr = sub.add_parser("mandate-remove", help="remove a symbol from the signed mandate (re-signs)")
+    mr.add_argument("symbol")
+    mr.add_argument("--operator", default="vince")
+    mr.add_argument("--reason", default="", help="why (recorded in the archive row)")
+    mr.add_argument(
+        "--force",
+        action="store_true",
+        help="remove even when the symbol is held or holdings cannot be verified",
+    )
+    mr.add_argument("--mandate", default=None, help="mandate JSON path (overrides env/default)")
+    mr.add_argument("--env")
+    mr.add_argument("--data", help="signals output directory")
+    mr.set_defaults(func=cmd_mandate_remove)
 
     pr = sub.add_parser("probe", help="validate the newest research artifact (read-only)")
     pr.add_argument("--artifact", help="explicit artifact path")
@@ -600,6 +820,18 @@ def build_parser() -> argparse.ArgumentParser:
     si.add_argument("--env")
     si.add_argument("--data", dest="data")
     si.set_defaults(func=cmd_simulate)
+
+    api = sub.add_parser("api", help="serve the signed control API (loopback only)")
+    api.add_argument("--bind", help="host:port (default TRADINGEXEC_API_BIND)")
+    api.add_argument("--env")
+    api.add_argument("--data")
+    api.set_defaults(func=cmd_api)
+
+    mcp = sub.add_parser("mcp", help="serve the MCP surface over JSON-RPC/HTTP (loopback only)")
+    mcp.add_argument("--bind", help="host[:port] (default TRADINGEXEC_MCP_BIND)")
+    mcp.add_argument("--env")
+    mcp.add_argument("--data")
+    mcp.set_defaults(func=cmd_mcp)
 
     ha = sub.add_parser("halt", help="engage the kill switch; --resume re-arms it")
     ha.add_argument(
