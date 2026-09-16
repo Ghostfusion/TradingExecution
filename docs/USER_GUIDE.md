@@ -31,10 +31,12 @@ you* what it thinks should happen, and only after checking many safety boxes.
 - ❌ Touch real money
 - ❌ Connect to any broker to execute trades
 
-(The code for a **paper** order path now exists and is tested, but it is off:
-`mode` defaults to `signal` — no order path at all — and paper/live additionally
-need an explicit `execute=True`. The live broker adapters are still missing, so
-nothing can reach a broker even if switched on. See §8.)
+(The code for a **paper** order path now exists and is tested, and the switches
+are **ON by default** (`mode=paper`), so the safety checks judge every candidate.
+Nothing is *sent* without the explicit `execute=True` opt-in passed on top, and
+real-money (live) trading needs a second permission as well. The live broker
+adapters are still missing, so nothing can reach a broker even when switched
+on. See §8.)
 
 A **signal is advice only**. You decide whether to act on it.
 
@@ -58,7 +60,10 @@ A **signal is advice only**. You decide whether to act on it.
 ```
 
 The daemon checks for new decisions regularly (about every 10 seconds) and
-runs in the background like a small always-on helper.
+runs in the background like a small always-on helper. It only *looks* during
+the regular trading session (09:30–16:00 ET; 13:00 on half days) — a report
+that lands after the close waits for the next open. A closed market is normal,
+not a fault, and the heartbeat keeps ticking either way.
 
 ## 4. Your safety rules (the "mandate")
 
@@ -67,12 +72,13 @@ boundaries of what you allow the system to suggest:
 
 | Rule | What it means |
 |---|---|
-| **Allowed symbols** | Only these stocks (e.g. SPY, AVGO, MSFT…) may produce signals |
+| **Allowed symbols** | Only these stocks (e.g. SPY, AVGO, MSFT…) may open a position; reducing or exiting one you already hold is still let through |
 | **No shorting** | The system never suggests betting against a stock (unless you change this) |
 | **Order size cap** | A suggested trade larger than your cap gets flagged/downscaled |
 | **Exposure cap** | Total suggested positions across the account stay under your limit |
 | **Cash reserve** | If your account cash falls below your minimum, suggestions stop |
-| **Tradable check** | Only real, currently-tradeable stocks; market-closed signals are tagged as "next session" |
+| **Tradable check** | Only real, currently-tradeable stocks |
+| **Trading hours** | New research is only read during market hours (09:30–16:00 ET; 13:00 on half days) — an after-hours report waits for the next open |
 | **Daily limit** | A maximum number of signals per day (anti-spam) |
 | **Fresh data** | Signals based on stale/old data are rejected |
 | **No duplicate** | The same decision is never sent twice |
@@ -102,9 +108,22 @@ Translation:
 
 **Common downgrade reasons you may see:**
 
-- "market closed" → the signal is for the **next trading session**
+- "market closed" → only on a manual one-off run (`--once`); the signal is for
+  the **next trading session**. The background daemon itself does not scan a
+  closed session, so you normally won't see this
 - "data quality partial" → some data was missing; treat the signal as weaker
 - "cooldown" → the same suggestion was already sent recently
+
+### 🟡 A second kind of notice: a mandate candidate
+
+The system never widens your rules on its own. If the research is strongly
+positive (Buy / Overweight) on a stock that is **not** in your allowed list, it
+sends a candidate card instead of a signal:
+
+> 🟡 **NFLX BUY** — not in the mandate and not held. Promote it with:
+> `signald mandate-add NFLX`
+
+Run that command if you agree (see §9). Ignore the card and nothing changes.
 
 ## 6. Where you see signals
 
@@ -135,13 +154,28 @@ Translation:
 | **Live trading** | Real orders — requires two independent opt-ins, a promotion checklist and a hard capital cap |
 | **More brokers** | Only Alpaca planning so far; multi-broker later |
 
-What IS built (all off by default): the risk gate that would judge every order,
-the sizing rules, the order safety checks (no market orders, stops required,
-duplicate and self-cross protection), the intraday setup engine, the scorecard,
-and the operator commands `probe`, `simulate`, `halt`, `scorecard`.
+All of it is built **and switched ON by default** (owner decision, 2026-09-13;
+the four switches are listed in `.env`). 'On' never means 'trades by itself':
+the order path still needs the explicit `execute=True` opt-in, and real-money
+trading needs a second permission too.
 
-Until you explicitly say otherwise, **this system only ever sends signals. It
-never trades.**
+| Switch | Default | What it turns on | Why it is still safe |
+|---|---|---|---|
+| `mode` | `paper` | The order path exists: every candidate is judged by the risk gate, the sizer and the order safety checks | Orders only leave when `execute=True` is passed too; `live` needs a second opt-in |
+| `intraday_enabled` | on | The day-trade sleeve (setups, cost gate, time gates) | The engine must also be given its own switch and `execute=True` |
+| `api_enabled` | on | The operator API (status, risk, halt) on `127.0.0.1` | Nothing listens until you start `py -3.12 -m signald api`, it is loopback-only, and it needs a signing key |
+| `mcp_enabled` | on | The read/simulate/propose tools for an AI assistant | Nothing listens until you start `py -3.12 -m signald mcp`; mutating tools stay absent unless you list them |
+
+Built and tested: the risk gate that judges every order, the sizing rules, the
+order safety checks (no market orders, stops required, duplicate and self-cross
+protection), the intraday setup engine, the scorecard, and the operator
+commands `mandate-add` and `mandate-remove` (widen or narrow your allowed list;
+each re-signs the mandate), `probe`, `simulate`, `halt`, `scorecard`, plus the
+two servers `api` and `mcp` (they only listen on this machine, and only while
+you run them).
+
+Until you pass `--execute` (and, for real money, grant the live permission),
+**this system only ever sends signals. It never trades.**
 
 ## 9. How to run it (the one command you may ever need)
 
@@ -152,7 +186,8 @@ leave it running:
 py -3.12 -m signald run --execute
 ```
 
-Four more commands exist for checking and for emergencies (all safe to run):
+Six more commands exist for checking, for your symbol list, and for emergencies
+(all safe to run):
 
 ```
 py -3.12 -m signald probe                     # would the executor accept the newest research file?
@@ -161,6 +196,8 @@ py -3.12 -m signald simulate --symbol AVGO --price 100 --stop 95 --at 09:45
 py -3.12 -m signald halt                      # STOP: engages the kill switch immediately
 py -3.12 -m signald halt --resume --post-mortem PM-2026-09-12   # re-arm (needs a written post-mortem)
 py -3.12 -m signald scorecard --trades trades.jsonl             # sleeve report card
+py -3.12 -m signald mandate-add NFLX                            # allow a stock a candidate card flagged
+py -3.12 -m signald mandate-remove NFLX                         # take away a stock's permission to open
 ```
 
 (Start it from the TradingExecution folder. Details live in the technical
@@ -173,13 +210,15 @@ No. Phase A sends signals (advice) only. Order placement comes later and only
 with your explicit permission.
 
 **Q: Why didn't I get a signal for a stock?**
-Most likely a safety rule: the stock isn't in your allowed list, the account
-cash is below your reserve, the data was stale, or the market is closed
-(in which case it would be tagged "next session" instead).
+Most likely a safety rule: the stock isn't in your allowed list (a strongly
+positive call on one you don't hold arrives as a candidate card instead), the
+account cash is below your reserve, the data was stale, or the session is
+closed — in which case the report waits for the next open.
 
 **Q: What if the market is closed?**
-Signals are still produced but tagged as next-session — you see the price at
-close and the suggestion applies to the next open.
+Nothing is read while the session is closed, so you don't get late-night pings;
+the report is picked up at the next open. A signal tagged "next session" only
+appears if you force a one-off scan yourself (`signald run --once`).
 
 **Q: Is this financial advice?**
 No. It's an automated summary of research against your rules. Decisions to

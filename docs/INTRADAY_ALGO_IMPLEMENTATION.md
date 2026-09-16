@@ -10,11 +10,11 @@ Authority for *when*: the phase gates in §8. Authority for *how it is verified*
 
 ## 0. Where this build starts
 
-### 0.1 What already exists (`signald`, Phase A — signal mode, no order path)
+### 0.1 What already exists (`signald`, Phase A boundary — default `paper` since 2026-09-13)
 
 | Module | What it does today | Reused by this plan |
 |---|---|---|
-| `signald/watch.py` | recursive discovery of `research_decision.json`, newest-per-symbol | yes (becomes one of two inbox producers) |
+| `signald/watch.py` | recursive discovery of `research_decision.json`, newest-per-symbol; regular-session scan window (`scan_rth_only`, broker-clock check), `--once` overrides | yes (becomes one of two inbox producers) |
 | `signald/schema.py` | `ResearchDecision` validation + hash-pinning; `SignalContract`; `ContractError` | extended (§2) |
 | `signald/mandate.py` | hash-pinned signed mandate, expiry, re-sign + archive | extended (sleeve ceilings, approval mode) |
 | `signald/gates.py` | fail-closed mandate gates returning `GateResult(verdict, blocked, downgrades, reasons, target_notional_usd, approval_required)` | folded into the house gate (§4, C7) |
@@ -23,7 +23,7 @@ Authority for *when*: the phase gates in §8. Authority for *how it is verified*
 | `signald/notifier.py` | journal-first webhook events (signal/error/kill_switch) | extended alert set (§9.4) |
 | `signald/kill_switch.py` | filesystem sentinel + persisted HALT episode latch | unchanged, plus house-wide flatten |
 | `signald/daemon.py` | PID lockfile, heartbeat | unchanged |
-| `signald/cli.py` | `run · verify · status · sample · approve · init-mandate · notify-test · watchdog`; dry-run default; `--execute` opt-in | extended (`simulate`, `propose`, `flatten`, `scorecard`) |
+| `signald/cli.py` | `run · verify · status · sample · approve · init-mandate · notify-test · watchdog`; default `mode=paper`; `--execute` still gates the order path | extended (`probe`, `simulate`, `halt`, `scorecard`, `api`, `mcp`, `mandate-add`, `mandate-remove`; `propose`/`flatten` never landed) |
 | `signald/watchdog.py` | heartbeat freshness + `heartbeat_loss` page | unchanged |
 
 Today's envelope already carries `signal_id`, `decision_hash`, `ticker`, `action`, `target_pct`, `score`,
@@ -37,7 +37,7 @@ blocked, reasons, target_notional_usd, approval_required}`, `approval.state`, `e
 |---|---|---|
 | A1 | Inbox + dedupe table (effectively-once ingest) and versioned envelopes | §2.2, §12.4 |
 | A2 | Sleeve router + per-sleeve `SleeveBudget` + capital ceilings | §3, §7 |
-| A3 | House risk gate v2 (15 named checks, `ALLOW`/`REDUCE`/`BLOCK` + `binding_gate`) | §4 |
+| A3 | House risk gate v2 (16 named checks, `ALLOW`/`REDUCE`/`BLOCK` + `binding_gate`) | §4 |
 | A4 | Orthogonal `opportunity_score` / `trade_permission` / `binding_gate` on every signal | §4.3 |
 | A5 | Intraday engine: market-data service, day-type classifier, 5 setups, cost gate, time gates | §6 |
 | A6 | One sizer + vol targeter + ES/CVaR engine + drawdown ladder | §7.2, §7.5, §10 |
@@ -71,7 +71,7 @@ TradingExecution/
 │   ├── contracts.py         (NEW: envelope validate + version negotiation + dead-letter)
 │   ├── mandate.py           (+ sleeve ceilings, approval thresholds, re-sign audit)
 │   ├── inbox.py             (NEW: dedupe table = effectively-once ingest)
-│   ├── watch.py             (unchanged behaviour, now feeds inbox)
+│   ├── watch.py             (regular-session scan window + --once override; now feeds inbox)
 │   ├── sleeves/
 │   │   ├── __init__.py
 │   │   ├── router.py        (NEW: decision/signal → sleeve)
@@ -87,7 +87,7 @@ TradingExecution/
 │   │   ├── setups.py        (NEW: ORB, VWAP pullback/reversion, GAP_GO/GAP_FADE)
 │   │   └── costgate.py      (NEW: expected-move vs k × round-trip cost)
 │   ├── risk/
-│   │   ├── gate.py          (NEW: 15 checks, verdict + binding gate)
+│   │   ├── gate.py          (NEW: 16 checks, verdict + binding gate)
 │   │   ├── voltarget.py     (NEW: EWMA vol, target scalar, warm-up, cap)
 │   │   ├── tail.py          (NEW: ES/CVaR parametric + EWMA + stress grid)
 │   │   ├── ladder.py        (NEW: path-independent de-risking + kill)
@@ -102,6 +102,7 @@ TradingExecution/
 │   │   └── flatten.py       (NEW: EOD flatten + flat verification)
 │   ├── reconcile.py         (NEW: broker↔local, fills-not-targets)
 │   ├── lineage.py           (NEW: allocation manager + scorecard + trial registry)
+│   ├── control.py          (NEW: control-surface host — `signald api` / `signald mcp`; local state + halt)
 │   ├── api/
 │   │   ├── server.py        (NEW: signed control API — read/propose/execute groups)
 │   │   └── signing.py       (NEW: HMAC canonical string, nonce store, key roles)
@@ -225,7 +226,7 @@ unchanged. Additions, all overridable in `.env` and all included in `config_hash
 
 | Group | Key | Default | Meaning |
 |---|---|---|---|
-| mode | `TRADINGEXEC_MODE` | `signal` | `signal` \| `paper` \| `live`; order path unreachable in `signal` |
+| mode | `TRADINGEXEC_MODE` | `paper` | `signal` \| `paper` \| `live`; order path unreachable in `signal`; paper still needs the caller's `execute=True` (owner decision 2026-09-13: default flipped ON) |
 | sleeves | `TRADINGEXEC_SLEEVE_SWING_CAPITAL_PCT` | 0.70 | hard ceiling, swing |
 | | `TRADINGEXEC_SLEEVE_INTRADAY_CAPITAL_PCT` | 0.30 | hard ceiling, intraday |
 | | `TRADINGEXEC_SLEEVE_SWING_VOL_TARGET` | 0.10 | annualized |
@@ -255,7 +256,9 @@ unchanged. Additions, all overridable in `.env` and all included in `config_hash
 | | `TRADINGEXEC_VOL_SCALE_CAP` | 1.5 | hard cap on the scalar |
 | | `TRADINGEXEC_VOL_REBALANCE_BAND` | 0.12 | act only beyond this relative move |
 | | `TRADINGEXEC_STRESS_CORRELATION` | 0.85 | cluster stress |
-| intraday | `TRADINGEXEC_INTRADAY_ENABLED` | `false` | opt-in |
+| scan | `TRADINGEXEC_SCAN_RTH_ONLY` | `true` | daemon reads artifacts only during the regular session (09:30–16:00 ET, 13:00 on half days, exchange clock); `signald run --once` overrides |
+| | `TRADINGEXEC_SCAN_CONFIRM_BROKER_CLOCK` | `true` | cross-check the calendar against the broker `/clock`; an unavailable clock means *do not scan* (fail closed; set `false` for an offline run) |
+| intraday | `TRADINGEXEC_INTRADAY_ENABLED` | `true` | sleeve switch (on by default); the router also needs the caller's `enabled=True` |
 | | `TRADINGEXEC_INTRADAY_ENTRY_AFTER` | `09:35` | ET |
 | | `TRADINGEXEC_INTRADAY_ENTRY_BEFORE` | `11:00` | ET |
 | | `TRADINGEXEC_INTRADAY_FLAT_BY` | `15:50` | ET |
@@ -277,12 +280,12 @@ unchanged. Additions, all overridable in `.env` and all included in `config_hash
 | | `TRADINGEXEC_MAX_QUOTE_STALENESS_S` | 2 | |
 | | `TRADINGEXEC_MAX_BAR_STALENESS_S` | 60 | |
 | | `TRADINGEXEC_CLOCK_MAX_OFFSET_MS` | 50 | FINRA 4590 |
-| api | `TRADINGEXEC_API_ENABLED` | `false` | |
+| api | `TRADINGEXEC_API_ENABLED` | `true` | on by default; `signald api` serves it (needs `API_KEY_ID` + signing secret, loopback only) |
 | | `TRADINGEXEC_API_BIND` | `127.0.0.1:8787` | loopback default |
 | | `TRADINGEXEC_API_KEY_ID` | — | role-scoped |
 | | `TRADINGEXEC_API_REPLAY_WINDOW_S` | 300 | |
 | | `TRADINGEXEC_APPROVAL_TTL_S` | 900 | single-use token TTL |
-| mcp | `TRADINGEXEC_MCP_ENABLED` | `false` | |
+| mcp | `TRADINGEXEC_MCP_ENABLED` | `true` | on by default; `signald mcp` serves it (loopback only) |
 | | `TRADINGEXEC_MCP_BIND` | `127.0.0.1` | never `0.0.0.0` |
 | | `TRADINGEXEC_MCP_TOOLSETS` | `read,simulate,propose` | mutating tools absent unless explicitly listed |
 | lineage | `TRADINGEXEC_TRIAL_REGISTRY` | `./audit/trials.jsonl` | N is a first-class output |
@@ -583,12 +586,14 @@ An LLM can never enlarge a size, change a stop, or resubmit after approval: the 
 
 ## 8. Phases and gates
 
-Nothing after P1 is enabled before the phase that precedes it is signed off. Every phase ships **off by default**.
+Nothing after P1 lands before the phase that precedes it is signed off. The owner decision of 2026-09-13 flipped the
+*runtime* defaults ON (§3); the discipline is unchanged, and the gates that hold an order back - the caller's
+`execute=True`, the second live opt-in, the intraday caller flag - are untouched.
 
 | Phase | Deliverable | Exit criteria (all must hold) | Must stay disabled |
 |---|---|---|---|
-| **P0 — Boundary & contracts** | `contracts/*.schema.json`; envelope validate/version/dead-letter; inbox + dedupe; config v2 keys; alias removal; CI independence job | contract tests green (unknown MAJOR rejected, expiry enforced, enums closed); dedupe proven on replay; independence job passes with the sibling repo renamed | everything: `MODE=signal`, no order path |
-| **P1 — Sleeves, gate, budget (signals only)** | sleeve router; `SleeveBudget`; house gate v2 (15 checks, binding gate); `opportunity_score`/`trade_permission` on the envelope; ES/vol/ladder engines; scorecard skeleton | gate table tests (each check blocks when it should, `REDUCE` names its check); ES/vol formulas match hand-worked examples; envelope carries the two orthogonal fields; `signals.jsonl` unchanged in shape for existing consumers (additive only) | order path, intraday engine |
+| **P0 — Boundary & contracts** | `contracts/*.schema.json`; envelope validate/version/dead-letter; inbox + dedupe; config v2 keys; alias removal; CI independence job | contract tests green (unknown MAJOR rejected, expiry enforced, enums closed); dedupe proven on replay; independence job passes with the sibling repo renamed | no order path (P0 landed with `MODE=signal`; the default is `paper` since the 2026-09-13 owner decision) |
+| **P1 — Sleeves, gate, budget (signals only)** | sleeve router; `SleeveBudget`; house gate v2 (16 checks, binding gate); `opportunity_score`/`trade_permission` on the envelope; ES/vol/ladder engines; scorecard skeleton | gate table tests (each check blocks when it should, `REDUCE` names its check); ES/vol formulas match hand-worked examples; envelope carries the two orthogonal fields; `signals.jsonl` unchanged in shape for existing consumers (additive only) | order path, intraday engine |
 | **P2 — Paper order path** | policy selector, OrderGuard, order manager, `TradingStream` state machine, synthetic stops, reconciler, `--execute` gate | paper submit→fill→reconcile drill with query-before-retry; duplicate-submission drill yields exactly one order; partial-fill + restart drill; SIGKILL drill; no naked stop-market in the code path | intraday sleeve, MCP mutate, live |
 | **P3 — Intraday sleeve in paper** | market-data service (SIP requirement), calendar/clock, day-type classifier, 5 setups, cost gate, time/halt machines, EOD flatten | one full paper session: scan → signals → gated orders → flat by 15:55 → reconciled; stale-data and halt drills pass; cost gate blocks a deliberately uneconomic setup; `flat_by` verified against the broker | MCP mutate, live, allocation changes |
 | **P4 — Validation & comparison harness** | trial registry, backtest-with-costs harness sharing the same risk/size code, comparator, scorecard report | 2026-01-02→2026-09-11 both sleeves on the same universe/capital/costs, trade-for-trade; DSR/PBO recorded with N; paired bootstrap interval reported; documented as **feasibility, not superiority** (§10.3) | live |
@@ -618,7 +623,7 @@ neutered), and a CHANGELOG entry.
 | Class | What it proves |
 |---|---|
 | Contract | version negotiation, unknown-field/enum policy, expiry, hash pinning, dead-letter reasons |
-| Gate | every one of the 15 checks blocks when it should; precedence; `REDUCE` names its check; no check can be bypassed by omitting an input |
+| Gate | every one of the 16 checks blocks when it should; precedence; `REDUCE` names its check; no check can be bypassed by omitting an input |
 | Property-based | sizing/gate invariants across randomized books (e.g. "size never exceeds the sleeve ceiling", "a stop always exists before submission", "exposure is never computed from targets") |
 | Mutation | each gate test must fail when the gate is neutered (one proof per gate, recorded in the PR) |
 | Replay | a recorded session reproduces the same signals/decisions deterministically |
@@ -711,6 +716,11 @@ This row is what makes the comparison *trade-for-trade* and what decomposes alph
 | 15:45–15:55 | flatten intraday; verify flat against the broker; closing-auction preference where eligible |
 | 16:15 | post-close: reconcile fills vs positions vs journal; compute the day's scorecard; write the audit summary |
 | 17:00 | report: sleeve PnL, slip vs model, gate histogram (which gate blocked how often), data-quality summary |
+
+The daemon's poll loop scans the regular session only (09:30–16:00 ET, 13:00 on half days;
+`TRADINGEXEC_SCAN_RTH_ONLY` / `TRADINGEXEC_SCAN_CONFIRM_BROKER_CLOCK`, both `true`), on the
+exchange clock and cross-checked against the broker `/clock`; `signald run --once` overrides. The
+08:00 heartbeat check stays meaningful outside the window.
 
 ### 11.2 Incident runbook
 

@@ -16,12 +16,42 @@ Plan references: §11.1 lifecycle, §11.2 incidents, §11.3 kill switch/re-arm, 
 | 09:35 | day-type classification; intraday eligibility set (RVOL/rank/liquidity/regime) | `py -3.12 -m signald run --once --watch ./decisions --data ./signals` |
 | 09:35–11:00 | intraday entry window; every order passes gate → sizer → OrderGuard | `py -3.12 -m signald run --execute --watch ./decisions --data ./signals` |
 | 11:00–15:45 | manage only: stops, targets, time stops; **no new intraday entries** | `py -3.12 -m signald run --execute` |
-| 15:45–15:55 | flatten intraday; verify flat against the broker; closing-auction preference where eligible | `py -3.12 -m signald flatten` **(planned)** |
-| 16:15 | post-close: reconcile fills vs positions vs journal; compute the day's scorecard; write the audit summary | `py -3.12 -m signald scorecard` **(planned)** |
-| 17:00 | report: sleeve PnL, slip vs model, gate histogram, data-quality summary | `py -3.12 -m signald scorecard --report` **(planned)** |
+| 15:45–15:55 | flatten intraday; verify flat against the broker; closing-auction preference where eligible | `py -3.12 -m signald flatten` **(planned: the machine is `signald/order/flatten.py`; no CLI command yet)** |
+| 16:15 | post-close: reconcile fills vs positions vs journal; compute the day's scorecard; write the audit summary | `py -3.12 -m signald scorecard --trades trade_rows.jsonl` |
+| 17:00 | report: sleeve PnL, slip vs model, gate histogram, data-quality summary | `py -3.12 -m signald scorecard --trades trade_rows.jsonl --review review.json` |
+
+**Scan window.** The daemon only *scans* during the regular session — 09:30–16:00 ET, 13:00 on
+half days, no weekends/holidays — evaluated on the exchange clock and cross-checked against the
+broker's `/clock` (`TRADINGEXEC_SCAN_RTH_ONLY` / `TRADINGEXEC_SCAN_CONFIRM_BROKER_CLOCK`, both
+`true`; an unavailable clock means *do not scan*). Outside it the loop is idle by design and prints
+one `[scan] market post (… ET); not scanning` line per phase. The `--once` rows above (09:00,
+09:35) are the operator override and bypass the window; the heartbeat ticks either way, so a
+closed market never looks like a dead daemon.
 
 Every loop writes a heartbeat; a stale heartbeat pages via the watchdog:
 `py -3.12 -m signald watchdog`.
+
+---
+
+## Control surfaces (`signald api`, `signald mcp`)
+
+Both bind loopback only and refuse any other host before a socket exists. Neither is
+started by the daemon: a flag is a permission, not a listener.
+
+```bash
+py -3.12 -m signald api --bind 127.0.0.1:8787   # needs TRADINGEXEC_API_KEY_ID + API_SIGNING_SECRET
+py -3.12 -m signald mcp --bind 127.0.0.1        # JSON-RPC/HTTP; toolsets per TRADINGEXEC_MCP_TOOLSETS
+```
+
+| Surface | Wired today | Deliberately not wired |
+|---|---|---|
+| `signald api` | the read routes (signals, pending orders, kill switch, config hash) and `POST /v1/halt` | propose/simulate/submit/cancel/ceiling → `503 api_disabled` (no broker adapter yet) |
+| `signald mcp` | the read tools, `halt_trading` (never gated), proposal/approval stores under `audit/` | `simulate_order`/`propose_order` → `simulate_unavailable`; `submit_order`/`set_sleeve_allocation` → not offered unless their toolset is listed, then `*_unavailable` |
+
+Broker-backed reads (`account`, `positions`, `risk`, `sleeves`) answer `null` until the P5
+adapters exist — an absent number, never an invented one. The API maps its one configured key
+to the `admin` role; role-scoped keys belong in the OS keystore (plan §7.2) before any mutating
+route is wired.
 
 ---
 
@@ -58,9 +88,10 @@ Halt is a filesystem sentinel plus a persisted episode latch (`TRADINGEXEC_KILL_
 
 Halt sequence — in order:
 
-1. `py -3.12 -m signald kill` **(planned: MCP `halt_trading` or CLI)** — write the sentinel.
-2. Cancel working orders: `py -3.12 -m signald flatten --cancel-only` **(planned)**.
-3. Flatten intraday: `py -3.12 -m signald flatten --intraday` **(planned)**.
+1. `py -3.12 -m signald halt` — write the sentinel. Equivalents: MCP `halt_trading`
+   (`signald mcp`) or `POST /v1/halt` (`signald api`); all three engage the same switch.
+2. Cancel working orders: `py -3.12 -m signald flatten --cancel-only` **(planned: no CLI command yet)**.
+3. Flatten intraday: `py -3.12 -m signald flatten --intraday` **(planned: no CLI command yet)**.
 4. Freeze new entries: the sentinel already suppresses emission; confirm `py -3.12 -m signald status`
    shows `kill_switch: HALTED`.
 5. Write the episode latch (done automatically on halt): verify `./audit/halt_episode.json` exists and
@@ -69,11 +100,41 @@ Halt sequence — in order:
 Re-arm sequence — in order:
 
 1. Write the post-mortem first; re-arm requires its reference id.
-2. `py -3.12 -m signald rearm --postmortem <ref>` **(planned)** — clears the sentinel; the episode
+2. `py -3.12 -m signald halt --resume --post-mortem <ref>` — clears the sentinel; the episode
    record is **retained** as the audit trail.
 3. Restore size in **staged** steps across sessions: 25% → 50% → 100%, each step subject to the vol
    target and the drawdown ladder.  Never restore in one jump.
 4. Confirm `py -3.12 -m signald status` shows `kill_switch: armed` and a fresh heartbeat.
+
+---
+
+## Mandate change (widen / narrow the allowed list)
+
+`mandate.json` is hash-pinned: a hand-edited file is **rejected at load**, so widening or narrowing
+the symbol list goes through the re-signing verbs (`signald/mandate.py`), which archive the old
+mandate id and write atomically.
+
+```bash
+py -3.12 -m signald mandate-add NFLX --reason "candidate card 2026-09-15"
+py -3.12 -m signald mandate-remove NFLX --reason "position closed"
+py -3.12 -m signald mandate-remove NFLX --force --reason "holdings feed down"
+```
+
+- `mandate-add <SYMBOL>` re-signs with the symbol added. A running daemon picks it up on its next
+  poll — the loop re-reads the mandate each cycle, audited as `mandate_reloaded` — so no restart.
+  Refusal rows carry the mandate hash they were judged under, so artifacts refused only for the
+  symbol check are **re-opened exactly once** by the widening; emitted signals never replay.
+- `mandate-remove <SYMBOL>` refuses while the symbol is held or while holdings cannot be verified:
+  without a provable position the gate cannot exempt the exit, so the name would be stranded.
+  `--force` overrides; the printed warning is real — the name stops taking entries and an
+  unprovable holding keeps its exit blocked.
+- Both take `--operator` / `--reason` (recorded in the archive row) and the daemon's
+  `--data` / `--mandate` / `--env` overrides. **Pass the daemon's `--data`**: the
+  `mandate_added` / `mandate_removed` audit row lands in that data dir's ledger, so pointing the
+  verb at another dir leaves the running daemon without a record of the change.
+- The executor never widens its own mandate. A strongly-rated buy for a not-held name it bars is
+  queued in `<data>/mandate_candidates.jsonl`, audited as `mandate_candidate`, and paged as a card
+  carrying the exact promotion command.
 
 ---
 

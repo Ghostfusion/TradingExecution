@@ -2,6 +2,33 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-16 — documentation brought back in line with the code
+
+An audit of every human-facing doc against `signald/` found six claims describing behaviour the daemon no
+longer has, ten surfaces with no doc at all, and two stale counts. All corrected in place; no code changed.
+
+- **The scan window is now documented** (README, USER_GUIDE, RUNBOOK's daily lifecycle, AGENT_ONBOARDING):
+  the daemon only processes artifacts during the regular session (09:30-16:00 ET, 13:00 on half days, no
+  weekends or holidays), evaluated in exchange time and cross-checked against the broker's `/clock`; a report
+  that lands after the close waits for the next open, the heartbeat keeps ticking so the watchdog stays quiet,
+  and `signald run --once` is the operator override. The old "market closed -> next-session signal" framing is
+  now correctly described as reachable only through that override.
+- **The mandate-promotion flow is now documented** (USER_GUIDE, RUNBOOK "Mandate change" procedure): an
+  out-of-mandate artifact whose only binding block is the symbol check and whose rating is buy/overweight lands
+  in `<data>/mandate_candidates.jsonl` and raises a Discord candidate card carrying
+  `signald mandate-add <TICKER>`; `mandate-add` / `mandate-remove` re-sign and archive the mandate atomically, a
+  changed mandate hot-reloads without a restart, refusals are journaled by mandate hash (so adding a symbol
+  reopens that artifact exactly once) and emissions never carry one.
+- **Allow-list wording corrected** (USER_GUIDE): the symbol check gates ENTRIES - a confirmed reduce/exit of a
+  provably held name is exempt, unknown holdings keep the block (fail closed).
+- **INTRADAY_ALGO_DESIGN gate table G1** now records the held-name exit exemption.
+- **DESIGN.md**: the PDT rule is marked retired (2026-06-04, superseded by the Intraday Margin Rule) and
+  explicitly not to be built; the gate verdict vocabulary is `PASS | DOWNGRADE | BLOCK` with `binding_gate`, and
+  the entry rules are the shipped ones (never a market order).
+- **Counts**: the suite is 1102 tests; `signald/risk/gate.py` has 16 named checks (the plan said 15).
+- An extra drift found while editing: INTRADAY_ALGO_DESIGN §10 presented the soft-loss action as "halve size",
+  which contradicts ladder rung 1 as shipped.
+
 ## 2026-09-15 (c) — the daemon scans only in the regular session, and the clock is UTC again
 
 Owner request: *"make sure signald only scans during the stock market open."* The poll loop now honours

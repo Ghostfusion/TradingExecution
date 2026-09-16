@@ -52,11 +52,12 @@ Finnhub, vendor chain, analyst tools) do **not** apply here.
    and replaced by the Intraday Margin Rule on 2026-06-04) — verify against
    current docs, cite what you found, and say so when a search contradicts an
    assumption. Do not trust remembered-from-training broker/regulatory facts.
-8. **Paper/signal only until explicitly opted in.** Phase A is mode `signal`
-   (no orders, no `submit_order` path — a `NOT_IMPLEMENTED` guard raises).
-   `paper` requires `--execute`; `live` requires two independent opt-ins
-   (env + flag). Dry-run is the default; a second daemon instance must be
-   refused (PID lockfile).
+8. **Paper/signal only until explicitly opted in.** The config default is mode
+   `paper` (owner decision 2026-09-13): the order path is reachable, but a
+   session still needs `execute=True` before an order moves, `live` needs two
+   independent opt-ins (env + flag), and the real Alpaca order adapter is not
+   written yet (the manager submits through an injected broker seam). Dry-run
+   is the default; a second daemon instance must be refused (PID lockfile).
 
 ---
 
@@ -108,6 +109,13 @@ research_decision.json (from TradingAgents)
   → audit ledger (hash-chained) + kill switch + idempotency journal (decision_hash)
 ```
 
+The poll loop touches the heartbeat every cycle but only **scans** inside the regular session —
+09:30–16:00 ET, 13:00 on half days, no weekends/holidays — on the exchange clock, cross-checked
+against the broker `/clock` (`TRADINGEXEC_SCAN_RTH_ONLY` / `TRADINGEXEC_SCAN_CONFIRM_BROKER_CLOCK`,
+both `true`; an unavailable clock fails **closed**). `signald run --once` bypasses the window.
+Each scan re-reads `mandate.json` first (`processor.refresh_mandate`), so an operator's
+`signald mandate-add` / `mandate-remove` takes effect on the next poll, audited `mandate_reloaded`.
+
 Key contracts / non-negotiables (plan §4.4–4.12):
 
 - **Idempotency:** `decision_hash` dedupes signals today; at M1 a
@@ -146,12 +154,18 @@ TradingExecution/
 │   ├── stores.py       signals.jsonl/latest.json, journal, SHA-256 audit chain
 │   ├── notifier.py     webhook events, journal-first, never raises
 │   ├── kill_switch.py  sentinel + persisted HALT episode latch
-│   ├── watch.py        poll loop (decisions/ inbox)
-│   ├── processor.py    pipeline: validate→precheck→idempotency→ref→gates→envelope→persist
+│   ├── watch.py        poll loop (decisions/) — regular-session scan window
+│   │                   (scan_rth_only + broker-clock check), --once overrides
+│   ├── processor.py    pipeline: validate→precheck→idempotency→ref→gates→envelope→persist;
+│   │                   refresh_mandate (hot reload), mandate candidates queue
 │   ├── daemon.py       PID lockfile + heartbeat
-│   ├── cli.py          run/verify/status/sample/approve/init-mandate
+│   ├── cli.py          run · verify · status · sample · approve · init-mandate ·
+│   │                   notify-test · watchdog · probe · simulate · halt ·
+│   │                   scorecard · api · mcp · mandate-add · mandate-remove
+│   │                   (default mode paper; --execute still gates the order path)
+│   ├── control.py      hosts the control surfaces (local state + halt; no order effects)
 │   └── samples.py      demo research_decision.json generator
-└── tests/             53 hermetic tests (zero network)
+└── tests/             1102 hermetic tests (zero network; ambient TRADINGEXEC_*/ALPACA_* stripped)
 ```
 
 Quick loop: `py -3.12 -m pytest tests/ -q -p no:cacheprovider`;

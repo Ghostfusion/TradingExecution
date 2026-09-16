@@ -8,8 +8,9 @@ design: **two sleeves under one house risk gate**, fed by the research layer but
 
 Companion: [`INTRADAY_ALGO_IMPLEMENTATION.md`](INTRADAY_ALGO_IMPLEMENTATION.md) — components, contracts, phases, tests.
 
-> Not financial advice. Nothing in this document places an order. The current shipped state of this repo is
-> Phase A: `signald` emits **signals** only. Every phase below is opt-in and gated.
+> Not financial advice. Nothing in this document places an order. The shipped state of this repo is the signal
+> daemon plus the paper order path; the switches default ON (owner decision 2026-09-13) — but an order still
+> requires the caller's `execute=True`, and `live` requires two independent opt-ins. Every phase below is gated.
 
 ---
 
@@ -221,7 +222,7 @@ This is the entire point of running both:
 
 | # | Check | Blocks / reduces when | Binding-gate name |
 |---|---|---|---|
-| G1 | mandate | symbol not allowed, mandate expired, leverage/daily-count breach | `mandate` |
+| G1 | mandate | symbol not allowed (**entries only** — a reduce/exit of a provably held name is exempt; unknown holdings keep the block), mandate expired, leverage/daily-count breach | `mandate` |
 | G2 | sleeve ceiling | sleeve notional would exceed its capital ceiling | `sleeve_capital` |
 | G3 | portfolio CVaR / ES | projected 1-day 97.5% ES of the book > budget | `house_cvar` |
 | G4 | drawdown | rolling/intraday drawdown beyond the de-risking ladder rung | `house_drawdown` |
@@ -507,7 +508,7 @@ derived in the research corpus [R1].
 | Stop distance | max(1.5–2.0× ATR(14), the 80th-percentile Maximum Adverse Excursion for that setup); never <1.0× ATR | stops bound loss size; tighter stops are **not** a universal expectancy improvement (they help only under momentum) [R1] |
 | Stop placement | never at round numbers, prior-day high/low, or LULD band edges; cluster-proximity check required | stop clusters become predictable market flow [R1][X3] |
 | Halt policy | no new entries within ±5 min of a limit state; positions marked at the band edge (not last trade); no chasing the reopening auction; if halted in the last 10 min, no re-open occurs | LULD mechanics [X3][R1] |
-| Soft daily loss | −1% of house equity | halve size, stop new intraday entries |
+| Soft daily loss | −1% of house equity | stop new intraday entries (swing unaffected; rung 1 of §7.5) |
 | Hard daily loss | −3% | flatten intraday sleeve, no new entries until next session, page |
 | De-risk triggers | −6% over 5 days, or −10% peak-to-trough | rungs 3–4 of §7.5 |
 | Flatten time | 15:50–15:55 ET, verified | no overnight intraday state |
