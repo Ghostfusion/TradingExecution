@@ -36,9 +36,23 @@ Every loop writes a heartbeat; a stale heartbeat pages via the watchdog:
 Nothing runs the watchdog for you, and an unsupervised daemon that dies is silent (2026-09-16: the process
 was gone for a whole regular session, and the operator learned about it from the log, not a page).
 
-- **A supervisor with a restart policy.** Never run the daemon from an interactive shell. On this box it runs
-  as a hub-supervised process named `signald` with `persist=true` and `restart=on-failure`; NSSM, systemd or a
-  Task Scheduler boot trigger are equivalent — what matters is that a crash comes back by itself.
+- **The daemon runs under Task Scheduler, never under a terminal.** Task `Signald_Daemon` runs
+  `run_daemon.cmd` (repo root) at logon and daily 08:00 CT on weekdays, with `RestartOnFailure` (every minute,
+  up to 10 tries), no execution-time limit and no stop-on-battery or stop-on-idle. A terminal-launched daemon
+  dies with its window — that is precisely what ended the 2026-09-16 session — so launch it by hand only as
+  `run --once`.
+
+```powershell
+schtasks /run   /tn Signald_Daemon                        # start it now
+schtasks /end   /tn Signald_Daemon                        # stop it (terminates the process tree)
+schtasks /query /tn Signald_Daemon /v /fo LIST            # status, last result, next run
+```
+
+  Its stdout/stderr append to `signals/signald_daemon.log` (append + unbuffered, so it is readable while the
+  daemon runs; rotate it by hand if it ever grows — the steady state is a handful of lines a day, not the ~26k
+  the pre-2026-09-16 poll loop wrote). The task is interactive-token and least-privilege, so it needs the
+  operator logged on; a machine-wide service (NSSM, per INTRADAY_ALGO_DESIGN) is the move if the daemon must
+  survive a logoff.
 - **A scheduled watchdog.** Task Scheduler task `Signald_Watchdog`: weekdays, starting 08:00 CT, every 5
   minutes for 7 h 30 m. It must run with the repo root as its working directory (so `.env` supplies
   `TRADINGEXEC_NOTIFIER_URL`) *and* point at the live heartbeat, which lives under the data dir the daemon was
@@ -52,8 +66,10 @@ py -3.12 -m signald watchdog --heartbeat .\signals\audit\heartbeat
   every poll *before* the window check, so a closed market is fresh and only a stopped or wedged daemon pages
   (`heartbeat_loss` to the notifier). **A deliberate stop must disable the task** —
   `schtasks /change /tn Signald_Watchdog /disable` — or it pages every 5 minutes until you do.
-- **After a host reboot** neither the daemon nor the watchdog comes back on its own. Start the hub process and
-  confirm with `signald status`. Known gap, stated here so it is not a surprise.
+- **After a host reboot**, logging on starts the daemon (logon trigger) and the watchdog resumes on its next
+  slot — `StartWhenAvailable` lets a slot missed while the machine was off run as soon as it is back. A reboot
+  with nobody logging on leaves the daemon down; that is the interactive-token tradeoff above, stated here so
+  it is not a surprise. Confirm with `signald status`.
 
 ---
 
@@ -101,7 +117,7 @@ One row per alert in §9.4.  Alerts are emitted to the notifier (Discord webhook
 | `duplicate_client_order_id` | Stop the submitting loop; query the broker for the in-flight id before any retry. |
 | `kill_switch` | Confirm the sentinel is present and the episode latch written; begin re-arm only after a post-mortem. |
 | `sleeve_ceiling_hit` | Expected on a full sleeve; no action unless it fires weekly without a novel cause. |
-| `heartbeat_loss` | Assume the daemon is down; `py -3.12 -m signald status`, inspect `signald.pid`, restart under the PID lock. |
+| `heartbeat_loss` | Assume the daemon is down; `py -3.12 -m signald status`, inspect `signals/signald_daemon.log` and `signals/signald.pid`, then `schtasks /run /tn Signald_Daemon` (the PID lock refuses a second instance if it was only wedged — end the task first, `schtasks /end /tn Signald_Daemon`). |
 
 ---
 

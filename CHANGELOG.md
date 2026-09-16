@@ -2,6 +2,30 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-16 (d) — the daemon runs from Task Scheduler, independent of any terminal
+
+The session missed on 2026-09-16 was a daemon launched from a shell: closing the window took it down mid-day.
+It now has supervision of its own, so no terminal owns it.
+
+- **`Signald_Daemon`** (Task Scheduler) runs `run_daemon.cmd` at logon and daily 08:00 CT on weekdays, with
+  restart-on-failure (every minute, up to 10), an unlimited execution-time limit, no stop-on-battery and no
+  stop-on-idle, and `IgnoreNew` so a second instance can never start (the daemon's PID lock is the second line
+  of defence). The first attempt pointed the task straight at a `cmd /c ... >> log` command line and never
+  started: cmd's quote-stripping mangled it into `"prog" -B -m ...` and the task died with "The filename,
+  directory name, or volume label syntax is incorrect". The launcher script keeps the quoting out of that path
+  entirely.
+- **Its output is durable**: stdout/stderr append to `signals/signald_daemon.log` (unbuffered). The steady
+  state is now a handful of lines a day — the report-on-change filter from (c) is what makes that true, and
+  the running daemon shows it: banner plus one line per artifact, then silence.
+- **Stated, not implied**: the task is interactive-token and least-privilege, so it needs the operator logged
+  on (the same shape as the existing `TradingAgents_NightlyReview` / `_StrategyQuality` tasks); a machine-wide
+  NSSM service is the move if the daemon must survive a logoff. The watchdog task, the mandate and the audit
+  ledger are unchanged.
+- The hub supervision recorded in (c) is retired: `hub` supervises the batch runs, not production. An operator
+  who wants the daemon up now uses `schtasks /run /tn Signald_Daemon`.
+
+Suite: 1104 passed (unchanged — this entry adds a launcher and docs, no library behaviour).
+
 ## 2026-09-16 (c) — a missed session: the dead-man's switch was never scheduled, and the poll log drowned the evidence
 
 The daemon process was gone for a whole regular session and nothing paged. Found while checking on it: the
@@ -23,10 +47,12 @@ the idempotency journal were both empty for them.
   (working directory pinned to the repo root so `.env` supplies the notifier URL; the live heartbeat is under
   the daemon's `--data ./signals`, not the config default `audit/heartbeat` — a bare `signald watchdog` from
   another directory checks the wrong file and reports a false LOSS). First run: `Last Result 0`. A deliberate
-  maintenance stop must disable the task or it pages every 5 minutes. The daemon itself now runs under the hub
-  with `restart=on-failure` instead of `restart=no`, so a crash comes back by itself.
-- Still open, and now stated in the runbook rather than left implicit: nothing restarts the daemon after a
-  **host reboot**.
+  maintenance stop must disable the task or it pages every 5 minutes. The daemon was also moved off
+  `restart=no` onto the hub with `restart=on-failure` as an interim step, so a crash came back by itself —
+  retired later the same session by the Task Scheduler task in (d).
+- Still open at this point, and stated in the runbook rather than left implicit: nothing restarts the daemon
+  after a **host reboot**. (d) closes that for a normal logon; a reboot with nobody logging in still leaves it
+  down, and that is called out in the runbook.
 
 Suite: 1104 passed (+2: the transition filter, and results naming their artifact).
 
