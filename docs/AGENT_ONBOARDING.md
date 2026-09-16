@@ -52,7 +52,14 @@ Finnhub, vendor chain, analyst tools) do **not** apply here.
    and replaced by the Intraday Margin Rule on 2026-06-04) — verify against
    current docs, cite what you found, and say so when a search contradicts an
    assumption. Do not trust remembered-from-training broker/regulatory facts.
-8. **Paper/signal only until explicitly opted in.** The config default is mode
+8. **A confirmed defect is fixed on sight, without asking (owner standing order, 2026-09-16).**
+   When the verifier, a test, a log or a review surfaces a defect, fix it in the same task — no
+   "want me to fix this?", no parking it for approval. Fix the SOURCE, add the regression test
+   that fails before the fix, run the affected suite, then commit + push (rule 3). Ask first
+   **only** when the fix is destructive to user data (daemon/mandate/order state, force-push,
+   key rotation) or would silently rewrite a decision contract the owner set (a threshold, an
+   approval mode, a gate semantic). Mirrors `TradingAgents/docs/AGENT_ONBOARDING.md` §0 rule 10.
+9. **Paper/signal only until explicitly opted in.** The config default is mode
    `paper` (owner decision 2026-09-13): the order path is reachable, but a
    session still needs `execute=True` before an order moves, `live` needs two
    independent opt-ins (env + flag), and the real Alpaca order adapter is not
