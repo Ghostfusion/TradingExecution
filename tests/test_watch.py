@@ -18,7 +18,7 @@ pytestmark = pytest.mark.timeout(120)
 # fix clock import to match conftest usage
 from signald.alpaca_ref import AlpacaReference  # noqa: E402
 from signald.notifier import Notifier  # noqa: E402
-from signald.processor import SignalProcessor  # noqa: E402
+from signald.processor import ProcessResult, SignalProcessor  # noqa: E402
 from signald.stores import AuditChain, Journal, SignalStore  # noqa: E402
 
 
@@ -202,3 +202,47 @@ def test_run_once_ignores_the_window_for_the_operator(cfg, seam):
     cfg = _at(cfg, AFTER_CLOSE)
     _write_decision(cfg.watch_dir, "AVGO", time.time(), effective_date=AFTER_CLOSE.date())
     assert [r.kind for r in WatchLoop(_proc(cfg, seam)).run_once()] == ["emitted"]
+
+
+def _pump(loop, iterations, on_result):
+    """Run the loop for ``iterations`` cycles, collecting what it reports."""
+    seen = {"n": 0}
+
+    def stop():
+        seen["n"] += 1
+        return seen["n"] > iterations
+
+    loop.run_forever(stop=stop, on_result=on_result)
+
+
+def test_run_forever_reports_a_transition_not_a_repeat(cfg, seam):
+    """An unchanged verdict is not re-announced on every poll.
+
+    The poll re-discovers every artifact still in the watch tree, so a handled
+    artifact was reprinted forever: measured 2026-09-16, three of them wrote
+    ~26k identical ``[skipped_duplicate]`` lines a day, which is what buried the
+    signal when the daemon stalled for a whole session.
+    """
+    loop = WatchLoop(_proc(_at(cfg, OPEN), seam), poll_seconds=0.01)
+    artifact = "C:/reports/NVDA_20260915_223229/research_decision.json"
+    seq = [
+        [ProcessResult("skipped_duplicate", path=artifact)],
+        [ProcessResult("skipped_duplicate", path=artifact)],
+        [ProcessResult("blocked", reasons=("not in mandate",), path=artifact)],
+        [ProcessResult("blocked", reasons=("not in mandate",), path=artifact)],
+    ]
+    it = iter(seq)
+    loop.run_once = lambda: next(it)
+    reported = []
+    _pump(loop, 4, reported.append)
+    assert [(r.kind, r.reasons) for r in reported] == [
+        ("skipped_duplicate", ()),
+        ("blocked", ("not in mandate",)),
+    ]
+
+
+def test_results_name_the_artifact_they_describe(cfg, seam):
+    """The report-on-change filter keys on this path; unstamped results defeat it."""
+    cfg = _at(cfg, AFTER_CLOSE)
+    p = _write_decision(cfg.watch_dir, "AVGO", time.time(), effective_date=AFTER_CLOSE.date())
+    assert [r.path for r in WatchLoop(_proc(cfg, seam)).run_once()] == [str(p)]

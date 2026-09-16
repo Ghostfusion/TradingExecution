@@ -31,6 +31,30 @@ closed market never looks like a dead daemon.
 Every loop writes a heartbeat; a stale heartbeat pages via the watchdog:
 `py -3.12 -m signald watchdog`.
 
+### Supervision — the two pieces that make that page real
+
+Nothing runs the watchdog for you, and an unsupervised daemon that dies is silent (2026-09-16: the process
+was gone for a whole regular session, and the operator learned about it from the log, not a page).
+
+- **A supervisor with a restart policy.** Never run the daemon from an interactive shell. On this box it runs
+  as a hub-supervised process named `signald` with `persist=true` and `restart=on-failure`; NSSM, systemd or a
+  Task Scheduler boot trigger are equivalent — what matters is that a crash comes back by itself.
+- **A scheduled watchdog.** Task Scheduler task `Signald_Watchdog`: weekdays, starting 08:00 CT, every 5
+  minutes for 7 h 30 m. It must run with the repo root as its working directory (so `.env` supplies
+  `TRADINGEXEC_NOTIFIER_URL`) *and* point at the live heartbeat, which lives under the data dir the daemon was
+  given (`--data ./signals` → `signals/audit/heartbeat`), not at the config default `audit/heartbeat`:
+
+```powershell
+py -3.12 -m signald watchdog --heartbeat .\signals\audit\heartbeat
+```
+
+  A 5-minute cadence detects a loss inside ~7 minutes (`DEFAULT_MAX_AGE_S` is 120 s). The heartbeat is touched
+  every poll *before* the window check, so a closed market is fresh and only a stopped or wedged daemon pages
+  (`heartbeat_loss` to the notifier). **A deliberate stop must disable the task** —
+  `schtasks /change /tn Signald_Watchdog /disable` — or it pages every 5 minutes until you do.
+- **After a host reboot** neither the daemon nor the watchdog comes back on its own. Start the hub process and
+  confirm with `signald status`. Known gap, stated here so it is not a surprise.
+
 ---
 
 ## Control surfaces (`signald api`, `signald mcp`)

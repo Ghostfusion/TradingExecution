@@ -8,7 +8,7 @@ research_decision.json -> load/validate/hash -> normalize -> fail-closed gates
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,10 @@ class ProcessResult:
     kind: str  # emitted | dry_run | blocked | halted | skipped_duplicate | invalid
     envelope: dict[str, Any] | None = None
     reasons: tuple[str, ...] = ()
+    #: The artifact this result describes. ``WatchLoop.run_forever`` keys its
+    #: report-on-change filter on it, so a decision that has not changed does
+    #: not reprint every poll.
+    path: str | None = None
 
 
 class SignalProcessor:
@@ -70,6 +74,17 @@ class SignalProcessor:
         self._reload_failure: str | None = None
 
     def process(self, path: str | Path) -> ProcessResult:
+        """Process one artifact, stamping the result with the artifact's path.
+
+        The path is what lets the poll loop report a *transition* instead of
+        reprinting an unchanged verdict every cycle: three handled artifacts
+        sitting in ``reports/`` produced ~26k identical stdout lines a day,
+        which is what buried the evidence when the daemon stalled for a session
+        (observed 2026-09-16).
+        """
+        return replace(self._process(path), path=str(path))
+
+    def _process(self, path: str | Path) -> ProcessResult:
         p = Path(path)
         now = self.cfg.now()
 

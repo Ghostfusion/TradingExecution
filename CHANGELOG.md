@@ -2,6 +2,34 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-16 (c) — a missed session: the dead-man's switch was never scheduled, and the poll log drowned the evidence
+
+The daemon process was gone for a whole regular session and nothing paged. Found while checking on it: the
+hub record said "exited without an exit code" with the process and the LSP mux and the control surface all
+dying in the same window (a host-level teardown, not a crash — the log carries no traceback). Restarted under
+the PID lock; it processed the backlog within two seconds (IEI blocked, `NVDA REDUCE` emitted, `sg-48070cd2-001`)
+— proving the artifacts had never been evaluated, and that nothing was double-fired, since the signal store and
+the idempotency journal were both empty for them.
+
+- **Report a transition, not a poll cycle.** `WatchLoop.run_forever` did not key anything on the artifact, so
+  every handled artifact still sitting in `reports/` was re-announced on every poll: three of them wrote ~26k
+  identical `[skipped_duplicate]` lines a day, which is what buried the evidence here. `ProcessResult` now
+  carries the artifact `path` and the loop reports a result only when it differs from the last one reported for
+  that path — unchanged means silence. `run --once` still prints every result: it is the operator override,
+  and it runs once. Verified on the live tree: 3 lines on the first cycle, 0 on the next two.
+- **The watchdog is documentation until something schedules it — now it is scheduled.** `docs/RUNBOOK.md` gains
+  a Supervision section, and Task Scheduler task `Signald_Watchdog` runs the existing
+  `signald watchdog --heartbeat ./signals/audit/heartbeat` every 5 minutes, weekdays 08:00 CT for 7 h 30 m
+  (working directory pinned to the repo root so `.env` supplies the notifier URL; the live heartbeat is under
+  the daemon's `--data ./signals`, not the config default `audit/heartbeat` — a bare `signald watchdog` from
+  another directory checks the wrong file and reports a false LOSS). First run: `Last Result 0`. A deliberate
+  maintenance stop must disable the task or it pages every 5 minutes. The daemon itself now runs under the hub
+  with `restart=on-failure` instead of `restart=no`, so a crash comes back by itself.
+- Still open, and now stated in the runbook rather than left implicit: nothing restarts the daemon after a
+  **host reboot**.
+
+Suite: 1104 passed (+2: the transition filter, and results naming their artifact).
+
 ## 2026-09-16 (b) — two test defects the suite could not see: a live-state write, and a date dependency
 
 Both were found by running the suite once UTC had rolled over. The suite was green the whole time it was

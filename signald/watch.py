@@ -61,6 +61,10 @@ class WatchLoop:
     def __init__(self, processor: SignalProcessor, poll_seconds: float = 10.0) -> None:
         self.processor = processor
         self.poll_seconds = max(0.5, float(poll_seconds))
+        #: Last reported state per artifact path. ``run_forever`` prints a
+        #: transition, never a repeat: a handled artifact stays in
+        #: ``reports/`` forever and used to be re-announced every poll.
+        self._reported: dict[str, tuple[str, tuple[str, ...]]] = {}
 
     def discover(self) -> list[Path]:
         watch = Path(self.processor.cfg.watch_dir)
@@ -123,6 +127,23 @@ class WatchLoop:
         half = ", half day (13:00 close)" if session_for(et.date()).is_half_day else ""
         return ScanWindow(True, "rth", f"regular session ({where}{half})")
 
+    def _report(self, res: ProcessResult) -> bool:
+        """True when this result differs from the last one reported for it.
+
+        The poll re-discovers every artifact still sitting in the watch tree, so
+        an unchanged verdict is old news: it was printed on the cycle it was
+        decided. Without this filter the shipped daemon wrote ~26k identical
+        ``[skipped_duplicate]`` lines a day (measured 2026-09-16), which is
+        enough noise to hide a real transition - or a stall - in the log.
+        """
+        if res.path is None:  # unstamped result: nothing to key on, report it
+            return True
+        state = (res.kind, res.reasons)
+        if self._reported.get(res.path) == state:
+            return False
+        self._reported[res.path] = state
+        return True
+
     def run_forever(self, stop: Callable[[], bool] | None = None, on_result=None) -> None:
         """Poll until stopped. Owns the cadence, the heartbeat and the scan window.
 
@@ -140,7 +161,7 @@ class WatchLoop:
                     print(f"[scan] {window.detail}", flush=True)
                     last_reason = None
                 for res in self.run_once():
-                    if on_result is not None:
+                    if on_result is not None and self._report(res):
                         on_result(res)
             elif window.reason != last_reason:  # announce each closed phase, once
                 last_reason = window.reason
