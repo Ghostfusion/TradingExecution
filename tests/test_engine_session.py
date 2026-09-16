@@ -145,6 +145,22 @@ def paper_cfg(tmp_path):
     cfg = load_config(env_file=tmp_path / "absent.env", environ={})
     return replace(
         cfg,
+        # Every filesystem field must be routed into tmp_path: load_config
+        # resolves them relative to the CWD, so this fixture used to write the
+        # OPERATOR'S live state - the real mandate.json (rewritten with
+        # DEFAULT_MANDATE on every run) and signals/orders_pending.jsonl (the
+        # live approval queue). Measured 2026-09-16 by comparing mtimes around a
+        # per-file suite run; the same field list the conftest ``cfg`` fixture
+        # overrides.
+        watch_dir=tmp_path / "decisions",
+        data_dir=tmp_path / "signals",
+        audit_file=tmp_path / "audit" / "audit.jsonl",
+        journal_file=tmp_path / "audit" / "journal.jsonl",
+        mandate_path=tmp_path / "mandate.json",
+        kill_switch_path=tmp_path / "kill_switch",
+        halt_latch_path=tmp_path / "audit" / "halt_episode.json",
+        heartbeat_path=tmp_path / "audit" / "heartbeat",
+        pid_file=tmp_path / "signald.pid",
         mode="paper",
         intraday_enabled=True,
         es_budget_house_pct=0.02,

@@ -2,6 +2,29 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-16 (b) — two test defects the suite could not see: a live-state write, and a date dependency
+
+Both were found by running the suite once UTC had rolled over. The suite was green the whole time it was
+writing the operator's live state, and the date-dependency only surfaced after midnight.
+
+- **Tests wrote live trading state.** `tests/test_engine_session.py`'s `paper_cfg` overrode behaviour but no
+  PATH, and `load_config` resolves paths relative to the CWD: every run rewrote the operator's `mandate.json`
+  (with `DEFAULT_MANDATE` — byte-identical by coincidence, not by construction) and appended to the live
+  `signals/orders_pending.jsonl`, the approval queue the control surface reads. 80 identical AVGO rows had
+  accumulated there, all stamped `2026-09-12T09:45:00` (that module's own SESSION constant). The fixture now
+  routes every filesystem field into `tmp_path` — the same list the conftest `cfg` fixture overrides — and the
+  polluted queue was backed up and cleared. Verified by comparing mtimes around a per-file suite run: no test
+  writes outside `tmp_path` now.
+- **A pinned-clock test was date-dependent.** `test_run_once_ignores_the_window_for_the_operator` wrote a
+  decision dated with the REAL clock (`samples.build_sample` uses `date.today()`) while pinning the clock to the
+  fixed `AFTER_CLOSE` (2026-09-15T21:00Z). Once the real UTC date passed that constant, ingest correctly
+  refused the artifact — "effective_date in the future (no lookahead)" — and the test failed. `_write_decision`
+  now takes an `effective_date`, and that test pins it to the pinned clock's own date. The clock itself cannot
+  move: the fake quote's `ts` is the fixture's fixed `NOW` constant, so moving the pin to the next day made the
+  quote 25 h stale and the gate block on `quote_age_s` instead (observed, then reverted).
+
+Suite: 1102 passed, and the full run writes nothing outside `tmp_path`.
+
 ## 2026-09-16 — documentation brought back in line with the code
 
 An audit of every human-facing doc against `signald/` found six claims describing behaviour the daemon no

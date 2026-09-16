@@ -37,10 +37,22 @@ def _proc(cfg, seam, mandate=None):
     return SignalProcessor(cfg, mandate, store, journal, audit, ref, Notifier(now=cfg.now))
 
 
-def _write_decision(folder, ticker: str, mtime: float):
+def _write_decision(folder, ticker: str, mtime: float, *, effective_date=None):
+    """Write a sample decision; ``effective_date`` defaults to the real today.
+
+    A test that PINS the clock must also pin this date (see
+    ``test_run_once_ignores_the_window_for_the_operator``): the sample is
+    normally dated with the real clock, and ingest refuses an effective_date
+    after the pinned clock's date, so a pinned-clock test silently becomes
+    "effective_date in the future" the moment the real date rolls past the
+    constant.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     p = Path(str(folder)) / ARTIFACT_NAME
-    p.write_text(json.dumps(build_sample(ticker=ticker)), encoding="utf-8")
+    p.write_text(
+        json.dumps(build_sample(ticker=ticker, effective_date=effective_date)),
+        encoding="utf-8",
+    )
     os_utime(p, mtime)
     return p
 
@@ -112,6 +124,9 @@ def _at(cfg, stamp, **overrides):
     return Config(**{**cfg.__dict__, "now_fn": (lambda s=stamp: s), **overrides})
 
 
+
+
+
 @pytest.mark.parametrize(
     ("stamp", "expected"),
     [(OPEN, True), (PRE_OPEN, False), (AFTER_CLOSE, False), (WEEKEND, False),
@@ -175,7 +190,15 @@ def test_run_forever_scans_inside_the_session(cfg, seam):
 
 
 def test_run_once_ignores_the_window_for_the_operator(cfg, seam):
-    """`signald run --once` is the override: it scans whenever the operator says."""
+    """`signald run --once` is the override: it scans whenever the operator says.
+
+    The decision is dated with the PINNED stamp's date, not the real today:
+    ingest refuses an effective_date after the clock's date, so this test failed
+    the moment the real date rolled past ``AFTER_CLOSE`` (observed
+    2026-09-16T05:32Z, "effective_date in the future (no lookahead)" - a test
+    dependency, not a product defect). The clock itself must stay on the
+    fixture's stamp, because the fake quote's ``ts`` is that same constant.
+    """
     cfg = _at(cfg, AFTER_CLOSE)
-    _write_decision(cfg.watch_dir, "AVGO", time.time())
+    _write_decision(cfg.watch_dir, "AVGO", time.time(), effective_date=AFTER_CLOSE.date())
     assert [r.kind for r in WatchLoop(_proc(cfg, seam)).run_once()] == ["emitted"]
