@@ -74,7 +74,12 @@ class BookState:
     five_day_pct: float = 0.0
     drawdown_pct: float = 0.0
     peak_equity: float | None = None
-    net_beta: float = 0.0
+    #: Net book beta. **No producer populates this yet** - the field was
+    #: declared with a `0.0` default and every construction site omitted it, so
+    #: a reader could not tell "zero beta" from "not measured" (an NA-as-zero
+    #: defect). It is `None` until something computes it (per-name beta x
+    #: position weight); `None` means unknown, never flat.
+    net_beta: float | None = None
     trades_today: dict[str, int] = field(default_factory=dict)
     sleeve_trades_today: dict[str, int] = field(default_factory=dict)
     open_orders: tuple[dict[str, Any], ...] = ()

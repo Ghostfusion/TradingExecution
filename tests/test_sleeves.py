@@ -38,6 +38,14 @@ def _pos(symbol: str, qty: float, price: float, sleeve: str) -> Position:
     return Position(symbol=symbol, qty=qty, avg_entry=price, last=price, sleeve=sleeve)
 
 
+def test_book_beta_is_unknown_not_zero_until_something_measures_it():
+    """`net_beta` was declared with a `0.0` default while every construction
+    site omitted it, so a reader could not tell "flat book" from "not
+    measured" (NA-as-zero). Unknown is `None`; a producer may still set it."""
+    assert _book().net_beta is None
+    assert BookState(equity=1.0, cash=0.0, net_beta=0.4).net_beta == 0.4
+
+
 # --- routing ---------------------------------------------------------------
 
 
