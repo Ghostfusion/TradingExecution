@@ -96,6 +96,12 @@ def cfg(tmp_path, now):
         halt_latch_path=tmp_path / "audit" / "halt_episode.json",
         heartbeat_path=tmp_path / "audit" / "heartbeat",
         pid_file=tmp_path / "signald.pid",
+        # The ingest boundary's state is anchored too: its defaults are
+        # repo-relative, so an unanchored fixture would write dead letters into
+        # the operator's live ./signals tree from inside a test.
+        inbox_file=tmp_path / "audit" / "inbox.jsonl",
+        dead_letter_dir=tmp_path / "signals" / "dead_letter",
+        quarantine_dir=tmp_path / "signals" / "quarantine",
         now_fn=lambda: now,
     )
     return c

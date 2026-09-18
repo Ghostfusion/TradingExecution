@@ -63,6 +63,12 @@ class Config:
     halt_latch_path: Path = Path("./audit/halt_episode.json")
     heartbeat_path: Path = Path("./audit/heartbeat")
     pid_file: Path = Path("./signald.pid")
+    #: The ingest boundary's durable state (signald/inbox.py). The inbox table
+    #: sits with the journal - both are bookkeeping the daemon appends to per
+    #: artifact - while the artifacts it sets aside live under the data dir.
+    inbox_file: Path = Path("./audit/inbox.jsonl")
+    dead_letter_dir: Path = Path("./signals/dead_letter")
+    quarantine_dir: Path = Path("./signals/quarantine")
 
     poll_seconds: float = 10.0
     watch_recursive: bool = True

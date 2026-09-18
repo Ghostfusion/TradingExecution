@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import json
 
 import pytest
 
+from signald.alpaca_ref import AlpacaReference
 from signald.kill_switch import is_halted
-from signald.samples import build_sample
+from signald.processor import SignalProcessor
+from signald.samples import build_sample, build_sample_v11
 from signald.stores import AuditChain, Journal, SignalStore
 
 pytestmark = pytest.mark.timeout(120)
@@ -62,6 +65,156 @@ def test_a_blocked_artifact_is_refused_once(processor, write_artifact, transport
     assert len([e for e in webhook_events if e["event"] == "error"]) == 1
     store = SignalStore(cfg.data_dir / "signals.jsonl", cfg.data_dir / "latest.json")
     assert store.read_all() == []
+
+
+def test_an_invalid_artifact_is_reported_once(processor, write_artifact, cfg, webhook_events):
+    """An artifact with no resolvable action is reported once, not once per poll.
+
+    2026-09-18: ``reports/AMZN_20260917_172613/research_decision.json`` carries
+    ``rating=null`` and ``direction=null`` - the emitter plan (§R1) says a field
+    with no source stays ``null`` and the artifact is still emitted, so the
+    executor's ``unresolvable_action`` rejection is correct. What was not
+    correct: the reports tree is re-discovered every 10 s, and the invalid path
+    was the one exit that recorded nothing, so the same unchanged file produced
+    an audit row plus a Discord error card per cycle for hours.
+
+    The refusal path next door learned this on 2026-09-15; the verdict here is
+    durable the same way.
+    """
+    path = write_artifact(build_sample_v11(ticker="AMZN", direction=None, rating=None))
+
+    assert processor.process(path).kind == "invalid"
+    assert processor.process(path).kind == "skipped_duplicate"
+
+    audit = AuditChain(cfg.audit_file, cfg.now)
+    assert len([r for r in audit.read() if r["kind"] == "rejected_invalid"]) == 1
+    assert len([e for e in webhook_events if e["event"] == "error"]) == 1
+
+
+def test_a_changed_artifact_is_re_evaluated_after_an_invalid_verdict(
+    processor, write_artifact, cfg, webhook_events
+):
+    """The dedupe keys on the artifact, not the path: a corrected re-emit speaks.
+
+    A new run over the same symbol writes a new body (new decision hash), so the
+    verdict must not suppress it - otherwise one bad artifact would mute every
+    later decision for that ticker.
+    """
+    first = write_artifact(build_sample_v11(ticker="AMZN", direction=None, rating=None))
+    assert processor.process(first).kind == "invalid"
+
+    corrected = write_artifact(build_sample_v11(ticker="AMZN", direction="reduce"))
+    assert processor.process(corrected).kind in {"emitted", "blocked"}
+
+    # the invalid verdict is not re-sent, and the corrected body got its own
+    # verdict (AMZN is outside the sample mandate, so that one is a refusal)
+    assert [e["source"] for e in webhook_events if e["event"] == "error"] == ["invalid_decision",
+                                                                            "signal_blocked"]
+
+
+def _wired(cfg, mandate, seam, notifier):
+    """The processor shape ``cli._build`` must keep producing."""
+    from signald.inbox import Inbox
+
+    audit = AuditChain(cfg.audit_file, cfg.now)
+    journal = Journal(cfg.journal_file, cfg.now)
+    store = SignalStore(cfg.data_dir / "signals.jsonl", cfg.data_dir / "latest.json")
+    inbox = Inbox(
+        cfg.inbox_file, cfg.dead_letter_dir, cfg.quarantine_dir, cfg.now, audit=audit
+    )
+    proc = SignalProcessor(
+        cfg, mandate, store, journal, audit, AlpacaReference(transport=seam), notifier,
+        inbox=inbox,
+    )
+    return proc, audit, inbox
+
+
+def test_the_daemons_boundary_settles_a_no_action_artifact_once(
+    cfg, mandate, seam, notifier, write_artifact, webhook_events
+):
+    """The shipped daemon builds the ingest boundary, and one artifact = one verdict.
+
+    ``signald run`` built its processor without an ``Inbox`` until 2026-09-18, so
+    the dedupe table that makes an artifact produce a single verdict was never
+    consulted in production, though the tests and the plan both assume it.
+
+    A no-action body is refused *at the boundary* (``unresolvable_action``), not
+    by the processor: ``validate_envelope`` owns action resolution, so the
+    artifact is dead-lettered with a reason code - once, however many polls see
+    it - and the processor is never reached.
+    """
+    proc, audit, inbox = _wired(cfg, mandate, seam, notifier)
+
+    path = write_artifact(build_sample_v11(ticker="AMZN", direction=None, rating=None))
+    assert proc.process(path).kind == "dead_lettered"
+    assert proc.process(path).kind == "skipped_duplicate"
+
+    assert len(list(inbox.dead_letter_dir.glob("*.reason.json"))) == 1
+    assert len([r for r in audit.read() if r["kind"] == "dead_lettered"]) == 1
+    assert [e for e in webhook_events if e["event"] == "error"] == []
+
+
+def test_the_daemons_boundary_settles_a_body_level_reject_once(
+    cfg, mandate, seam, notifier, write_artifact, webhook_events
+):
+    """A body the envelope accepts but the parser cannot read: one verdict, one page.
+
+    The two validators split the artifact - ``validate_envelope`` owns the
+    envelope (closed enums, action resolvability, expiry, the declared hashes),
+    ``parse_research_decision`` owns the body - so a body-level defect gets past
+    the boundary and is the processor's to refuse. ``position`` is the example:
+    the envelope never looks at it, the parser requires an object. That is the
+    path the AMZN flood came through.
+    """
+    proc, audit, inbox = _wired(cfg, mandate, seam, notifier)
+
+    path = write_artifact(
+        build_sample_v11(ticker="AMZN", direction="reduce", position="320 stop")
+    )
+    assert proc.process(path).kind == "invalid"
+    assert proc.process(path).kind == "skipped_duplicate"
+
+    assert len([r for r in audit.read() if r["kind"] == "rejected_invalid"]) == 1
+    assert [e["source"] for e in webhook_events if e["event"] == "error"] == [
+        "invalid_decision"
+    ]
+    assert inbox.pending() == []  # the verdict is recorded, not left dangling
+
+
+def test_the_daemons_boundary_dead_letters_an_artifact_once(
+    cfg, mandate, seam, notifier, write_artifact
+):
+    """An envelope-invalid artifact writes one dead letter, not one per poll."""
+    _, _, inbox = _wired(cfg, mandate, seam, notifier)
+
+    path = write_artifact(build_sample_v11(ticker="AMZN", direction="reduce"))
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["ticker"] = "amzn"  # a body edit without re-sealing: hash mismatch
+    path.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+
+    assert inbox.admit(path).kind == "dead_lettered"
+    assert inbox.admit(path).kind == "deduped"
+
+    assert len(list(inbox.dead_letter_dir.glob("*.reason.json"))) == 1
+
+
+def test_the_daemons_boundary_closes_a_refused_artifact(
+    cfg, mandate, seam, notifier, write_artifact
+):
+    """A refusal settles its boundary row: ``pending()`` stays a recovery list.
+
+    ``pending()`` exists to surface admissions whose effect never landed, so a
+    decided artifact must not sit in it. With the boundary wired into the daemon
+    for the first time, every refusal in the reports tree would otherwise be
+    listed as unfinished work.
+    """
+    proc, _, inbox = _wired(cfg, mandate, seam, notifier)
+
+    # AMZN is not in the sample mandate: a valid artifact, refused
+    assert proc.process(write_artifact(build_sample_v11(ticker="AMZN"))).kind == "blocked"
+
+    assert inbox.pending() == []
+    assert inbox.state_of(inbox.key_for({}, cfg.watch_dir / "x")) is None  # unknown key
 
 
 def _candidates(cfg):

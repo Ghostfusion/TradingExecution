@@ -20,7 +20,7 @@ from .inbox import Inbox
 from .kill_switch import ensure_episode, is_halted, read_episode
 from .mandate import Mandate, MandateError, load_mandate
 from .notifier import Notifier
-from .schema import ContractError, build_signal_contract, parse_research_decision
+from .schema import ContractError, build_signal_contract, parse_research_decision, sha256_of
 from .sleeves.router import RouteError, route_research
 from .stores import AuditChain, CandidateStore, Journal, SignalStore
 
@@ -28,6 +28,19 @@ from .stores import AuditChain, CandidateStore, Journal, SignalStore
 #: operator. Deliberately narrow: "buy"/"overweight" only, so the queue is the
 #: handful of names research actually likes rather than everything it mentions.
 PROMOTABLE_RATINGS: frozenset[str] = frozenset({"buy", "overweight"})
+
+
+def _artifact_key(raw: Any) -> str | None:
+    """Content key for an artifact whose body could not be parsed into a decision.
+
+    The canonical body hash - the same fallback ``Inbox.key_for`` uses - so both
+    layers agree on what "this artifact" means, and a re-emit for the same
+    symbol is a *different* key. ``None`` when there is no object to hash (the
+    file was unreadable, or its JSON is malformed): nothing durable to key on.
+    """
+    if not isinstance(raw, dict):
+        return None
+    return sha256_of(raw)
 
 
 @dataclass(frozen=True)
@@ -84,6 +97,19 @@ class SignalProcessor:
         """
         return replace(self._process(path), path=str(path))
 
+    def _settle(self, admission: Any | None) -> None:
+        """Close the boundary row for an artifact that has been decided.
+
+        Only an emission has a *side effect* to commit, but every terminal
+        verdict closes the admission: ``Inbox.pending`` exists to surface the
+        artifacts whose effect never landed, so leaving decided artifacts in it
+        would turn that recovery surface into a list of old news - and the
+        daemon wires this boundary now, so it would list every refusal.
+        Idempotent: the emit path commits with its ``signal_id`` first.
+        """
+        if self.inbox is not None and admission is not None:
+            self.inbox.commit(admission.key)
+
     def _process(self, path: str | Path) -> ProcessResult:
         p = Path(path)
         now = self.cfg.now()
@@ -106,16 +132,38 @@ class SignalProcessor:
             )
 
         # 1. load + validate
+        raw: Any = None
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
             rd = parse_research_decision(raw)
         except (json.JSONDecodeError, OSError, ContractError) as exc:
+            # An unresolvable artifact is a durable verdict, like a refusal: the
+            # reports poll re-discovers every artifact still in the tree, and
+            # this was the one exit that recorded nothing - so one unchanged
+            # file re-audited and re-notified every 10 s (2026-09-18: the AMZN
+            # artifact with rating=null and direction=null, hours of Discord
+            # error cards, one rejected_invalid row per cycle).
+            #
+            # The key is the artifact body, not its path: a corrected re-emit for
+            # the same symbol arrives as a new body and is evaluated on its own.
+            # No mandate hash - an artifact that cannot resolve an action never
+            # becomes resolvable because the mandate widened.
+            key = _artifact_key(raw)
+            if key and self.journal.is_processed(key):
+                return ProcessResult(
+                    "skipped_duplicate", reasons=("invalid verdict already recorded",)
+                )
+            if key:
+                ticker = str(raw.get("ticker") or "") if isinstance(raw, dict) else ""
+                self.journal.mark_processed(key, ticker, str(p), outcome="invalid")
+            self._settle(admission)
             self.audit.append("rejected_invalid", f"{p.name}: {exc}", path=str(p))
             self._notify_error("invalid_decision", f"{p.name}: {exc}")
             return ProcessResult("invalid", reasons=(str(exc),))
 
         # 2. prechecks: future date + ingest window
         if rd.effective_date > now.date():
+            self._settle(admission)
             self.audit.append("rejected", "effective_date in the future (no lookahead)",
                               ticker=rd.ticker, path=str(p))
             return ProcessResult("blocked", reasons=("effective_date in the future",))
@@ -126,6 +174,7 @@ class SignalProcessor:
         # reports/ added a skipped_duplicate row every 10 s, ~8.6k rows/day of
         # pure noise). The decision itself was recorded when it was handled.
         if self.journal.is_processed(rd.decision_hash, mandate_hash=self._mandate_hash):
+            self._settle(admission)  # handled by an earlier run: nothing pending here
             return ProcessResult("skipped_duplicate")
 
         # 4. reference data (fail-closed when unavailable)
@@ -133,6 +182,7 @@ class SignalProcessor:
             ref = self.ref.snapshot(rd.ticker)
         except ReferenceUnavailable as exc:
             if self.cfg.ref_required:
+                self._settle(admission)
                 self.audit.append("rejected", f"reference unavailable: {exc}",
                                   ticker=rd.ticker, path=str(p))
                 self._notify_error("reference_unavailable", f"{rd.ticker}: {exc}")
@@ -146,6 +196,7 @@ class SignalProcessor:
         try:
             route = route_research(rd, self.cfg)
         except RouteError as exc:
+            self._settle(admission)
             self.audit.append("rejected", f"sleeve routing refused: {exc}", ticker=rd.ticker)
             self._notify_error("routing_refused", f"{rd.ticker}: {exc}")
             if self.inbox is not None:
@@ -201,6 +252,7 @@ class SignalProcessor:
                     "; ".join(gate.blocked),
                     key=admission.key,
                 )
+            self._settle(admission)
             return ProcessResult("blocked", reasons=gate.blocked)
 
         # 7. envelope
@@ -209,6 +261,7 @@ class SignalProcessor:
 
         # 8. persist + notify
         if self.cfg.dry_run:
+            self._settle(admission)
             self.audit.append("dry_run", "signal computed; not persisted (dry-run)",
                               ticker=rd.ticker, decision_hash=rd.decision_hash,
                               gate_reasons=list(gate.reasons))

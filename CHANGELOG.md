@@ -2,6 +2,46 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-18 (e) — the ingest boundary was never wired, so one bad artifact paged all morning
+
+`reports/AMZN_20260917_172613/research_decision.json` carries `rating: null` and `direction: null` (the emitter
+plan says a field with no source stays `null` and the artifact is still emitted, so this is a valid artifact
+with no resolvable action — the executor's rejection is correct). The daemon re-notified it **every 10 seconds**
+for hours: the audit ledger holds **1327 `rejected_invalid` rows**, one per poll cycle, and Discord got a card
+for each.
+
+- **The root cause: `signald run` never built the `Inbox`.** `cli._build` constructed the processor with seven
+  positional arguments and `inbox` defaults to `None`, so the dedupe table that makes one artifact produce one
+  verdict — the module whose docstring is "effectively once", the one the tests and the plan both assume — was
+  **never consulted in production**. The two earlier fixes for this same bug class (the 2026-09-15 refusal loop,
+  the 2026-09-16 `skipped_duplicate` flood) patched the *symptoms* in the processor without noticing the boundary
+  was dead. It is now built and passed, with `inbox_file` / `dead_letter_dir` / `quarantine_dir` on `Config`
+  (env-overridable, anchored under `--data` with the other state paths).
+- **The invalid path recorded nothing.** It is the one exit that could not use the idempotency journal — parsing
+  failed, so there is no `decision_hash` — and so it re-audited and re-notified per cycle. It now keys the verdict
+  on the **artifact body hash** (the same canonical fallback `Inbox.key_for` uses) and journals it: one verdict,
+  one card. Keyed on content, not path, so a corrected re-emit for the same symbol is still evaluated.
+- **A dead letter is a file plus an audit row per rejection**, so an envelope-invalid artifact re-dead-lettered
+  every cycle too. The boundary now records the `dead_lettered` state and dedupes on re-admission; the unreadable
+  case is keyed on the file's identity (`mtime_ns`, `size`) so a *rewritten* file is still examined.
+- **Every terminal verdict settles its admission.** `commit` was called only on emit, so with the boundary newly
+  live `Inbox.pending()` — the recovery surface for "admitted but the effect never landed" — would have listed
+  every refusal in the reports tree forever. `_settle()` now closes invalid, blocked, routing-refused,
+  reference-unavailable, future-dated, dry-run and journal-skipped artifacts.
+- **Tests stopped modelling the bug.** The shared `processor` fixture built the processor *without* an inbox, so
+  the suite exercised a shape production never had. New tests pin the production shape: the boundary dead-letters
+  a no-action artifact once, settles a body-level reject once (with one page), closes a refusal, and a corrected
+  re-emit still speaks. `test_unknown_major_is_dead_lettered` asserted `not inbox.seen(...)` — "nothing to
+  dedupe: it never entered" — which *is* the defect; it now asserts the dedupe.
+- **Live, after restart:** 11 artifacts → 6 committed, 5 dead-lettered (1 `unresolvable_action`, 4 `expired`),
+  `pending() == []`, **zero `rejected_invalid` rows**, one dead-letter file per artifact. The flood is over.
+- **Not changed, deliberately:** the dead-letter path does not page. The design defines it as "never silent" in
+  the sense of never *discarded* — it is a file plus an audit row with a machine-readable `reason_code` — and the
+  owner's emitter spec keeps a no-action artifact legal, so the producer is not at fault here. Adding a page for
+  dead letters is a policy decision, not a defect fix.
+
+Suite: 1111 passed (1105 + 6 new).
+
 ## 2026-09-16 (d) — the daemon runs from Task Scheduler, independent of any terminal
 
 The session missed on 2026-09-16 was a daemon launched from a shell: closing the window took it down mid-day.

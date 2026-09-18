@@ -21,6 +21,7 @@ from .alpaca_ref import AlpacaReference, ReferenceUnavailable
 from .config import Config, load_config
 from .control import ControlSurfaceError, build_control_api, build_mcp_server, halt_now
 from .daemon import AlreadyRunning, DaemonLock
+from .inbox import Inbox
 from .kill_switch import is_halted, resume
 from .mandate import DEFAULT_MANDATE, MandateError, load_mandate, write_mandate
 from .notifier import Notifier
@@ -49,7 +50,21 @@ def _build(cfg: Config) -> tuple[SignalProcessor, AuditChain]:
         transport=cfg.transport,
         now=cfg.now,
     )
-    processor = SignalProcessor(cfg, mandate, store, journal, audit, reference, notifier)
+    # The ingest boundary is not optional in the daemon: it is what makes one
+    # artifact produce one verdict. Without it the poll re-discovers every
+    # artifact still in the reports tree and every path that cannot record a
+    # verdict (invalid, dead-lettered) re-fires each cycle - the 2026-09-18
+    # Discord flood, and before that the 2026-09-15 refusal loop.
+    inbox = Inbox(
+        cfg.inbox_file,
+        cfg.dead_letter_dir,
+        cfg.quarantine_dir,
+        cfg.now,
+        audit=audit,
+    )
+    processor = SignalProcessor(
+        cfg, mandate, store, journal, audit, reference, notifier, inbox=inbox
+    )
     return processor, audit
 
 
@@ -61,6 +76,9 @@ def _state_overrides(args: argparse.Namespace) -> dict:
         ov.update(
             audit_file=base / "audit" / "audit.jsonl",
             journal_file=base / "audit" / "journal.jsonl",
+            inbox_file=base / "audit" / "inbox.jsonl",
+            dead_letter_dir=base / "dead_letter",
+            quarantine_dir=base / "quarantine",
             halt_latch_path=base / "audit" / "halt_episode.json",
             heartbeat_path=base / "audit" / "heartbeat",
             pid_file=base / "signald.pid",

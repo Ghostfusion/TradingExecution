@@ -65,6 +65,17 @@ Finnhub, vendor chain, analyst tools) do **not** apply here.
    independent opt-ins (env + flag), and the real Alpaca order adapter is not
    written yet (the manager submits through an injected broker seam). Dry-run
    is the default; a second daemon instance must be refused (PID lockfile).
+10. **The ingest boundary is part of the daemon, not an option (2026-09-18).**
+   `cli._build` must construct the `Inbox` and pass it to the processor. It did
+   not until 2026-09-18, and the cost was a Discord card every 10 s for hours on
+   one artifact with no resolvable action (1327 `rejected_invalid` audit rows).
+   If you build a `SignalProcessor` anywhere that is meant to be production
+   shape, wire the boundary: without it, every path that cannot record a verdict
+   re-fires on each poll, because the reports tree is re-discovered every cycle.
+   A processor built without one is a test shape, not a daemon shape — and the
+   test fixtures that modelled the inbox-less processor are what let this ship.
+   Boundary state paths live on `Config` (`inbox_file`, `dead_letter_dir`,
+   `quarantine_dir`) and are anchored under `--data`.
 
 ---
 

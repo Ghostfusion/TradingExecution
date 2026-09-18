@@ -147,19 +147,38 @@ class Inbox:
             try:
                 body = _read_json(p)
             except (OSError, json.JSONDecodeError, EnvelopeError) as exc:
-                return self._dead_letter(None, EnvelopeError("unreadable", str(exc)), p)
+                # Unreadable is keyed on the file's identity, not its path: the
+                # watch tree is re-discovered every poll, so a corrupt file that
+                # never changes must not write a dead letter per cycle - while a
+                # rewritten file at the same path must be looked at again.
+                stamp = ""
+                try:
+                    st = p.stat()
+                    stamp = f":{st.st_mtime_ns}:{st.st_size}"
+                except OSError:
+                    stamp = ":gone"
+                key = f"unreadable:{p.name}{stamp}"
+                if self.seen(key):
+                    self._audit_row("deduped", "already dead-lettered (unreadable)", key, p)
+                    return Admission(DEDUPED, key, p, detail="duplicate dead letter")
+                return self._dead_letter(None, EnvelopeError("unreadable", str(exc)), p, key=key)
         else:
             body = raw
 
+        key = self.key_for(body, p)
         try:
             validate_envelope(body, now=now)
         except EnvelopeError as exc:
+            if self.seen(key):
+                self._audit_row(
+                    "deduped", f"already dead-lettered ({self.state_of(key)})", key, p
+                )
+                return Admission(DEDUPED, key, p, raw=body, detail="duplicate dead letter")
             producer = body.get("producer") if isinstance(body.get("producer"), dict) else {}
             return self._dead_letter(
                 body, exc, p, producer_hint=str(producer.get("service") or "") or None
             )
 
-        key = self.key_for(body, p)
         if self.seen(key):
             self._audit_row("deduped", f"already admitted ({self.state_of(key)})", key, p)
             return Admission(DEDUPED, key, p, raw=body, detail="duplicate artifact")
@@ -207,6 +226,7 @@ class Inbox:
         error: EnvelopeError,
         path: Path,
         producer_hint: str | None = None,
+        key: str | None = None,
     ) -> Admission:
         result = dead_letter(
             body if body is not None else {"unreadable": str(path)},
@@ -216,7 +236,11 @@ class Inbox:
             now=self._now(),
             producer_hint=producer_hint,
         )
-        key = self.key_for(body, path) if body else f"unreadable:{path.name}"
+        key = key or (self.key_for(body, path) if body else f"unreadable:{path.name}")
+        # Record the state so a re-poll of the same artifact is deduped above:
+        # the dead letter is a file plus an audit row, and the watch tree hands
+        # the same artifact back every cycle.
+        self._record(key, "dead_lettered", body, path, reason_code=error.reason_code)
         self._audit_row(
             "dead_lettered",
             error.detail,

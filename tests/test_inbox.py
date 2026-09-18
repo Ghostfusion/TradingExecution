@@ -155,11 +155,17 @@ def test_unknown_major_is_dead_lettered(inbox, tmp_path, audit):
 
     assert result.kind == DEAD_LETTERED
     assert result.reason_code == "unknown_major"
-    assert not inbox.seen(result.key)  # nothing to dedupe: it never entered
+    # The verdict is remembered: the reports tree is re-discovered every poll, so
+    # an artifact that never enters the pipeline still must not be re-dead-lettered
+    # (a file plus an audit row) on every cycle. 2026-09-18.
+    assert inbox.seen(result.key)
+    assert inbox.state_of(result.key) == "dead_lettered"
+    assert inbox.pending() == []  # decided, not awaiting an effect
+    assert inbox.admit(path).kind == DEDUPED
     reasons = list(inbox.dead_letter_dir.glob("*.reason.json"))
     assert len(reasons) == 1
     assert json.loads(reasons[0].read_text(encoding="utf-8"))["reason_code"] == "unknown_major"
-    assert [r["kind"] for r in audit.read()] == ["dead_lettered"]
+    assert [r["kind"] for r in audit.read()] == ["dead_lettered", "deduped"]
 
 
 def test_expired_artifact_is_dead_lettered(inbox, tmp_path, now):
