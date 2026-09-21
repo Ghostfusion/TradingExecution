@@ -33,8 +33,26 @@ Every loop writes a heartbeat; a stale heartbeat pages via the watchdog:
 
 ### Supervision — the two pieces that make that page real
 
-Nothing runs the watchdog for you, and an unsupervised daemon that dies is silent (2026-09-16: the process
-was gone for a whole regular session, and the operator learned about it from the log, not a page).
+Both pieces below are **scheduled** — the watchdog is not something you run by hand, and a daemon that dies
+is paged, not silent (2026-09-16: the process was gone for a whole regular session and the operator learned
+about it from the log, not a page — that incident is what the watchdog task was built for).
+
+**Detection is automatic. Recovery is not.** Measured on the 2026-09-18 death, and worth reading before
+trusting the pair:
+
+- The daemon died **15:15 CT** (`^C` in `signals/signald_daemon.log`; heartbeat mtime 15:15:02).
+  `Signald_Daemon`'s `Last Result` is `-1073741510` (`0xC000013A`, `STATUS_CONTROL_C_EXIT`) — a deliberate
+  `schtasks /end` or a console Ctrl+C, not a crash.
+- `RestartOnFailure` **did not fire**, and cannot: it retries a *failed* run, and a deliberate end is not a
+  failure. So ending the task is a **one-way door** until the next slot.
+- `Signald_Watchdog` **did** fire, at **15:30** (its last slot that day), `Last Result: 1` — the
+  `heartbeat_loss` page. Detection worked.
+- Nothing restarted the daemon. It stayed down **52.3 h** and did not return until the next weekday slot.
+- **The window is the exposure.** The watchdog runs weekdays 08:00–15:30 only, so a death late in the session
+  is paged **exactly once** and then silent across the weekend. Friday 15:15 is the worst case: one page, then
+  nothing until Monday 08:00.
+
+So: use `schtasks /end` only when you intend to leave it down, and prefer `--once` for a manual check.
 
 - **The daemon runs under Task Scheduler, never under a terminal.** Task `Signald_Daemon` runs
   `run_daemon.cmd` (repo root) at logon and daily 08:00 CT on weekdays, with `RestartOnFailure` (every minute,
