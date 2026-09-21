@@ -54,6 +54,16 @@ trusting the pair:
 
 So: use `schtasks /end` only when you intend to leave it down, and prefer `--once` for a manual check.
 
+**OWNER DECISION (2026-09-20): recovery stays MANUAL.** Asked whether the watchdog should also
+restart the daemon, widen its window, or stay as it is, the owner chose **status quo**. So:
+the watchdog pages and nothing auto-restarts, and the `heartbeat_loss` row below remains the
+recovery procedure. The reasoning the decision rests on, recorded so it is not re-litigated:
+an auto-restart would mask a daemon that is *wedged* rather than dead (the PID lock refuses a
+second instance, so the attempt would be a silent no-op exactly when it matters), and it would
+turn a visible outage into an invisible restart loop. A page an operator acts on is the
+supervision contract; the cost is that a Friday-afternoon death stays down until Monday 08:00,
+and that cost is now stated above rather than discovered.
+
 - **The daemon runs under Task Scheduler, never under a terminal.** Task `Signald_Daemon` runs
   `run_daemon.cmd` (repo root) at logon and daily 08:00 CT on weekdays, with `RestartOnFailure` (every minute,
   up to 10 tries), no execution-time limit and no stop-on-battery or stop-on-idle. A terminal-launched daemon
