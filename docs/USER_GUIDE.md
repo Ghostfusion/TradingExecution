@@ -72,7 +72,7 @@ boundaries of what you allow the system to suggest:
 
 | Rule | What it means |
 |---|---|
-| **Allowed symbols** | Only these stocks (e.g. SPY, AVGO, MSFT…) may open a position; reducing or exiting one you already hold is still let through |
+| **Allowed symbols** | Only these stocks (e.g. SPY, GLD, NVDA…) may open a position; reducing or exiting one you already hold is still let through |
 | **No shorting** | The system never suggests betting against a stock (unless you change this) |
 | **Order size cap** | A suggested trade larger than your cap gets flagged/downscaled |
 | **Exposure cap** | Total suggested positions across the account stay under your limit |
