@@ -119,13 +119,16 @@ def test_mandate_add_resigns_and_records_provenance(tmp_path, capsys):
     assert rc == 0
     after = load_mandate(path)
     assert "NFLX" in after.allowed and after.hash != before.hash
-    archive = [json.loads(l) for l in
+    archive = [json.loads(line) for line in
                (tmp_path / "mandate.json.archive.jsonl").read_text(encoding="utf-8").splitlines()]
     assert archive[-1]["ticker"] == "NFLX" and archive[-1]["action"] == "mandate_add"
     assert archive[-1]["operator"] == "vince" and archive[-1]["reason"] == "buy rating"
     assert archive[-1]["old_hash"] == before.hash and archive[-1]["new_hash"] == after.hash
-    rows = [json.loads(l) for l in
-            (tmp_path / "signals" / "audit" / "audit.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows = [json.loads(line) for line in
+            (tmp_path / "signals" / "audit" / "audit.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
     assert [r["kind"] for r in rows] == ["mandate_added"]
     assert rows[0]["data"]["new_hash"] == after.hash
     out = capsys.readouterr().out
@@ -192,7 +195,7 @@ def test_mandate_remove_force_removes_a_held_symbol(
     assert "NFLX" not in load_mandate(path).allowed
     out = capsys.readouterr().out
     assert "removed NFLX" in out and "still held" in out
-    archive = [json.loads(l) for l in
+    archive = [json.loads(line) for line in
                (tmp_path / "mandate.json.archive.jsonl").read_text(encoding="utf-8").splitlines()]
     assert archive[-1]["held"] is True and archive[-1]["action"] == "mandate_remove"
 

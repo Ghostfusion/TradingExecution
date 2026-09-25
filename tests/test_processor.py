@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -252,7 +252,9 @@ def test_a_held_buy_outside_the_mandate_is_not_a_candidate(
 ):
     transport_state["positions"] = {"positions_value": 500.0, "symbols": ["NFLX"]}
 
-    res = processor.process(write_artifact(build_sample(ticker="NFLX", direction=None, rating="Buy")))
+    res = processor.process(
+        write_artifact(build_sample(ticker="NFLX", direction=None, rating="Buy"))
+    )
 
     assert res.kind == "blocked"
     assert not _candidates(cfg).read_all()
@@ -261,7 +263,9 @@ def test_a_held_buy_outside_the_mandate_is_not_a_candidate(
 
 def test_unknown_holdings_do_not_make_a_candidate(processor, write_artifact, cfg, webhook_events):
     """The default seam reports no per-symbol detail: not proof, so no offer."""
-    res = processor.process(write_artifact(build_sample(ticker="NFLX", direction=None, rating="Buy")))
+    res = processor.process(
+        write_artifact(build_sample(ticker="NFLX", direction=None, rating="Buy"))
+    )
 
     assert res.kind == "blocked"
     assert not _candidates(cfg).read_all()
