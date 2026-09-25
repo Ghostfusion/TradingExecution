@@ -117,6 +117,10 @@ WEEKEND = datetime(2026, 9, 19, 14, 0, tzinfo=UTC)                   # Sat 10:00
 HOLIDAY = datetime(2026, 11, 26, 15, 0, tzinfo=UTC)                  # Thanksgiving
 HALF_DAY_OPEN = datetime(2026, 11, 27, 16, 30, tzinfo=UTC)          # 11:30 ET (13:00 close)
 HALF_DAY_CLOSED = datetime(2026, 11, 27, 18, 30, tzinfo=UTC)        # 13:30 ET
+# The last minutes of a normal session and of a half day: the close window is
+# measured to that day's own bell, not to a wall-clock hour.
+CLOSE_WINDOW = datetime(2026, 9, 15, 19, 55, tzinfo=UTC)            # Tue 15:55 ET
+HALF_DAY_CLOSE_WINDOW = datetime(2026, 11, 27, 17, 55, tzinfo=UTC)  # 12:55 ET
 
 
 def _at(cfg, stamp, **overrides):
@@ -136,6 +140,39 @@ def _at(cfg, stamp, **overrides):
 def test_the_scan_window_follows_the_regular_session(cfg, seam, stamp, expected):
     """An ET fact (09:30-16:00, 13:00 half days) - the host clock's zone is irrelevant."""
     assert WatchLoop(_proc(_at(cfg, stamp), seam)).scan_window().open is expected
+
+
+def test_the_close_window_is_the_last_minutes_of_that_days_own_session(cfg, seam):
+    """The playbook's 15:45-15:55 window is measured to the bell, not the clock.
+
+    On a half day the same window is 12:45-13:00, and after the bell the phase
+    is `post` - so a close window can never be reported on a day that has no
+    close, or after one has happened.
+    """
+    from signald.marketdata.calendar import close_window
+
+    assert close_window(CLOSE_WINDOW, 15) == (True, 5)
+    assert close_window(OPEN, 15) == (False, None)  # 10:00 ET: hours to go
+    assert close_window(HALF_DAY_CLOSE_WINDOW, 15) == (True, 5)  # 12:55 ET
+    assert close_window(AFTER_CLOSE, 15) == (False, None)  # past the bell
+    assert close_window(WEEKEND, 15) == (False, None)  # no session, no close
+    assert close_window(CLOSE_WINDOW, 0) == (False, None)  # disabled
+
+
+def test_the_close_window_labels_the_scan_without_changing_it(cfg, seam):
+    """It is a LABEL: the window is still open (RTH is already scanned)."""
+    in_window = WatchLoop(_proc(_at(cfg, CLOSE_WINDOW), seam)).scan_window()
+    assert in_window.open is True
+    assert in_window.reason == "rth_close"
+    assert "CLOSE WINDOW" in in_window.detail and "5m to the 16:00 bell" in in_window.detail
+
+    mid = WatchLoop(_proc(_at(cfg, OPEN), seam)).scan_window()
+    assert mid.reason == "rth" and "CLOSE WINDOW" not in mid.detail
+
+    off = WatchLoop(
+        _proc(_at(cfg, CLOSE_WINDOW, close_window_minutes=0), seam)
+    ).scan_window()
+    assert off.reason == "rth" and off.open is True
 
 
 def test_the_closed_window_says_why(cfg, seam):

@@ -138,6 +138,13 @@ class Config:
     # 08:30-15:00 local, and the host clock's zone never enters the decision.
     # `signald run --once` deliberately ignores this (operator override).
     scan_rth_only: bool = True
+    # The last N minutes of the SESSION count as the close window, measured to
+    # that day's own bell (15:45-16:00 normally, 12:45-13:00 on a half day) -
+    # the playbook's "run at 15:45-15:55 and act on the close". The daemon
+    # already scans all of RTH, so this adds no scanning: it LABELS the window
+    # (the phase reads `rth_close`) so the log and the operator can tell a
+    # close-adjacent pickup from a mid-session one. 0 disables the label.
+    close_window_minutes: int = 15
     # Cross-check the calendar against the broker's own clock, which knows about
     # unscheduled halts and early closes the code-shipped calendar cannot.
     # Unavailable clock => do not scan (fail closed); set False to run offline.

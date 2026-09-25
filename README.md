@@ -36,7 +36,12 @@ order without a mandate; research is advisory, execution is committed.
   artifacts outside it, the calendar is cross-checked against the broker
   `/clock` (`TRADINGEXEC_SCAN_RTH_ONLY` / `TRADINGEXEC_SCAN_CONFIRM_BROKER_CLOCK`,
   both on; an unknown clock means *do not scan*), and `signald run --once` is the
-  deliberate override. A strongly-rated buy the mandate bars is never
+  deliberate override. The last `TRADINGEXEC_CLOSE_WINDOW_MINUTES` (default 15)
+  minutes of the session are LABELLED the close window — the phase reads
+  `rth_close` and the log line says how long is left to that day's bell — so a
+  close-adjacent pickup (the playbook's 15:45–15:55 sweep) is distinguishable
+  from a mid-session one; the window adds no scanning and `0` disables it. A
+  strongly-rated buy the mandate bars is never
   auto-widened: it lands in `<data>/mandate_candidates.jsonl`, in the audit, and
   as a candidate card naming the exact promotion command. `signald mandate-add` /
   `mandate-remove` re-sign and archive the mandate (atomically), and a running

@@ -28,6 +28,12 @@ one `[scan] market post (… ET); not scanning` line per phase. The `--once` row
 09:35) are the operator override and bypass the window; the heartbeat ticks either way, so a
 closed market never looks like a dead daemon.
 
+**Close window.** The last `TRADINGEXEC_CLOSE_WINDOW_MINUTES` (default 15) minutes of the session
+are labelled the close window: the phase reads `rth_close` and one `[scan] regular session, CLOSE
+WINDOW (Nm to the 16:00 bell)` line is printed when it starts, so the 15:45–15:55 sweep above is
+visible in the log as such. It is measured to that day's own bell, so on a half day it is
+12:45–13:00. It adds no scanning (RTH is already scanned) and `0` disables the label.
+
 Every loop writes a heartbeat; a stale heartbeat pages via the watchdog:
 `py -3.12 -m signald watchdog`.
 

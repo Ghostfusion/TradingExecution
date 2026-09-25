@@ -233,3 +233,33 @@ def session_phase(stamp: datetime) -> str:
     if clock < session.close_et:
         return "rth"
     return "post"
+
+
+def close_window(stamp: datetime, minutes: int) -> tuple[bool, int | None]:
+    """Is ``stamp`` inside the last ``minutes`` of its session, and how many are left?
+
+    The playbook's execution advice ("run the scan at 15:45-15:55 and act on
+    the close") is a claim about the last minutes of the SESSION, so the window
+    is measured to that day's own bell: 15:45-16:00 on a normal day and
+    12:45-13:00 on a half day (the closing auction, not a wall-clock hour).
+
+    ``minutes`` <= 0 disables the window. ``(False, None)`` outside a session,
+    past the bell, or merely before the window opens - a close window cannot
+    exist on a day that has no close, and after the bell the phase is ``post``,
+    not "close adjacent". ``remaining`` is whole minutes to the bell and is
+    returned only while the window is open, so the caller can print it without
+    arithmetic.
+    """
+    if minutes <= 0:
+        return False, None
+    et = to_et(stamp)
+    session = session_for(et.date())
+    if not session.is_session or session.close_et is None:
+        return False, None
+    bell = datetime.combine(session.date, session.close_et, tzinfo=et.tzinfo)
+    remaining_s = (bell - et).total_seconds()
+    if remaining_s < 0:
+        return False, None
+    if remaining_s > minutes * 60:
+        return False, None
+    return True, int(remaining_s // 60)

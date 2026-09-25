@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .daemon import touch_heartbeat
-from .marketdata.calendar import session_for, session_phase, to_et
+from .marketdata.calendar import close_window, session_for, session_phase, to_et
 from .processor import ProcessResult, SignalProcessor
 
 ARTIFACT_NAME = "research_decision.json"
@@ -125,6 +125,15 @@ class WatchLoop:
                 return ScanWindow(False, "broker_closed",
                                   f"broker clock says closed ({where}); not scanning")
         half = ", half day (13:00 close)" if session_for(et.date()).is_half_day else ""
+        in_close, remaining = close_window(stamp, int(getattr(cfg, "close_window_minutes", 0) or 0))
+        if in_close:
+            bell = session_for(et.date()).close_et
+            return ScanWindow(
+                True,
+                "rth_close",
+                f"regular session, CLOSE WINDOW ({remaining}m to the "
+                f"{bell:%H:%M} bell{half}) ({where})",
+            )
         return ScanWindow(True, "rth", f"regular session ({where}{half})")
 
     def _report(self, res: ProcessResult) -> bool:
@@ -151,6 +160,7 @@ class WatchLoop:
         market must not look like a dead daemon to ``signald watchdog``.
         """
         last_reason: str | None = None
+        last_open_reason: str | None = None
         while True:
             if stop is not None and stop():
                 return
@@ -160,6 +170,12 @@ class WatchLoop:
                 if last_reason is not None:  # announce the reopen, once
                     print(f"[scan] {window.detail}", flush=True)
                     last_reason = None
+                elif last_open_reason is not None and window.reason != last_open_reason:
+                    # e.g. rth -> rth_close: the window opened while already
+                    # scanning, so the transition is worth one line (it is what
+                    # tells an operator a pickup was close-adjacent).
+                    print(f"[scan] {window.detail}", flush=True)
+                last_open_reason = window.reason
                 for res in self.run_once():
                     if on_result is not None and self._report(res):
                         on_result(res)

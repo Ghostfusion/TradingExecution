@@ -2,6 +2,42 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-25 — the close window is now named in the scan, and the lint step is green again
+
+The owner's playbook asks for the decision run at **15:45–15:55 ET** ("act on the
+close"). The daemon already scans all of the regular session, so a report written
+in that window was already picked up — what was missing was any way to TELL a
+close-adjacent pickup from a mid-session one, in the log or afterward.
+
+- **`calendar.close_window(stamp, minutes)`** — is this minute inside the last
+  `minutes` of the SESSION, and how many remain. Measured to that day's own bell
+  (`Session.close_et`, 16:00 or 13:00 on a half day), so "the last 15 minutes"
+  means 15:45–16:00 normally and 12:45–13:00 on a half day. Returns `(False, None)`
+  outside a session, past the bell, or before the window opens; `minutes <= 0`
+  disables it.
+- **`Config.close_window_minutes = 15`** (`TRADINGEXEC_CLOSE_WINDOW_MINUTES`; 0
+  disables) and `WatchLoop.scan_window` reports the phase `rth_close` with
+  `CLOSE WINDOW (Nm to the 16:00 bell)` in the detail. **The window still
+  SCANS** — it is a label, not a gate, and the RTH gate is unchanged.
+- **The loop announces an open-phase reason change** (rth -> rth_close) once, the
+  same way it already announced each closed phase, so the window's arrival is one
+  line in the daemon log rather than something an operator has to infer from
+  timestamps. The reopen line and the closed-phase lines are unchanged.
+- Nothing about orders changed: the mandate is still checked first, `signald
+  flatten` still carries the closing-auction TIF, and the guard's TIF allowlist
+  (`ALLOWED_TIFS = ("day", "gtc")`) does **not** include `cls` — that mismatch is
+  a safety-surface decision for the owner, not something this change touches.
+- **The lint step is green again.** `ruff check signald/ tests/` (the CI lint
+  command) was failing on six PRE-EXISTING errors in files this change does not
+  otherwise touch: an unused `datetime` import in `signald/cli.py`, three
+  ambiguous `l` loop variables plus a 102-char line in `tests/test_cli.py`, and
+  an unsorted import block plus two 102-char lines in `tests/test_processor.py`.
+  An unsorted-import autofix and five small edits; no behaviour changed.
+- Tests: `tests/test_watch.py` +2 (`close_window`'s own boundaries including a
+  half day and the disabled case; the label being a label), full suite **1113
+  passed**, `ruff check signald/ tests/` clean.
+
+
 ## 2026-09-18 (e) — the ingest boundary was never wired, so one bad artifact paged all morning
 
 `reports/AMZN_20260917_172613/research_decision.json` carries `rating: null` and `direction: null` (the emitter
