@@ -240,9 +240,25 @@ def test_an_unsupported_tif_denies(mandate, cfg):
     assert result.ok is False and result.binding == "bracket_legality"
 
 
+def test_the_closing_auction_tif_is_legal(mandate, cfg):
+    """``cls`` is what flatten.py plans a close-routed leg with.
+
+    It was absent from ALLOWED_TIFS, so the planner's own auction preference
+    could not have survived this check (owner decision 2026-09-25: day, gtc,
+    cls). The IOC/FOK family and ``opg`` stay out - nothing here emits them.
+    """
+    result = run(mandate, cfg, intent(tif="cls"))
+    assert result.ok is True and result.reasons == ()
+    for still_out in ("opg", "fok"):
+        denied = run(mandate, cfg, intent(tif=still_out))
+        assert denied.ok is False and denied.binding == "bracket_legality"
+
+
 def test_extended_hours_require_a_day_tif(mandate, cfg):
     result = run(mandate, cfg, intent(tif="gtc", extended_hours=True))
     assert result.ok is False and result.binding == "bracket_legality"
+    # the auction TIF is not a substitute in extended hours either
+    assert run(mandate, cfg, intent(tif="cls", extended_hours=True)).ok is False
 
 
 def test_extended_hours_reject_a_stop_leg(mandate, cfg):

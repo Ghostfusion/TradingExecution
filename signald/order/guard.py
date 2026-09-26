@@ -37,7 +37,13 @@ from ..risk.state import BookState, MarketState
 ALLOWED_ORDER_TYPES = ("limit", "marketable_limit", "stop", "stop_limit")
 
 #: TIFs legal for a two-sleeve day-trading book (plan §4.4 bracket legality).
-ALLOWED_TIFS = ("day", "gtc")
+#: ``cls`` is the closing-auction TIF the flatten planner chooses when it routes
+#: a leg through the close (``order/flatten.py:CLOSING_AUCTION_TIF``, plan
+#: §4.6) - it was missing here, so the plan's own auction preference could not
+#: have passed this check. ``opg`` and the IOC/FOK family stay out: nothing in
+#: this book emits them, and adding a TIF is a safety-surface decision each time
+#: (owner decision 2026-09-25: day, gtc, cls).
+ALLOWED_TIFS = ("day", "gtc", "cls")
 
 #: Order types legal in extended hours.
 EXTENDED_HOURS_ORDER_TYPES = ("limit", "marketable_limit")

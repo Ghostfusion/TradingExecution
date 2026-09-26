@@ -33,8 +33,17 @@ close-adjacent pickup from a mid-session one, in the log or afterward.
   ambiguous `l` loop variables plus a 102-char line in `tests/test_cli.py`, and
   an unsorted import block plus two 102-char lines in `tests/test_processor.py`.
   An unsorted-import autofix and five small edits; no behaviour changed.
+- **`ALLOWED_TIFS` now includes the closing-auction TIF** (owner decision
+  2026-09-25): `("day", "gtc", "cls")`. `flatten.py` plans a close-routed leg
+  with `tif="cls"` (its `CLOSING_AUCTION_TIF`), and the guard's allowlist did
+  not contain it - latent while flatten is not routed through the guard, but the
+  two constants disagreed, which is the kind of gap that only shows up on the
+  day the path is wired. `opg` and the IOC/FOK family stay out: nothing in this
+  book emits them. The extended-hours rule is unchanged (it still demands `day`,
+  so `cls` is refused there too). Tests: +1 (the auction TIF passes legality;
+  `opg`/`fok` still deny; extended hours still refuse it).
 - Tests: `tests/test_watch.py` +2 (`close_window`'s own boundaries including a
-  half day and the disabled case; the label being a label), full suite **1113
+  half day and the disabled case; the label being a label), full suite **1114
   passed**, `ruff check signald/ tests/` clean.
 
 
