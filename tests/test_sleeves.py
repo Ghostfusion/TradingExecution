@@ -46,6 +46,39 @@ def test_book_beta_is_unknown_not_zero_until_something_measures_it():
     assert BookState(equity=1.0, cash=0.0, net_beta=0.4).net_beta == 0.4
 
 
+def test_cluster_exposure_share_is_a_notional_share_on_the_hhi_scale():
+    """RISK-7/RISK-12's pinned proxy, hand-worked: two names in one sector.
+
+    40k + 60k notional on 100k equity -> the largest cluster is 1.0 of the book
+    and the SECOND cluster 0.0. The scale is 0..1 (the same one the engine's
+    `portfolio_hhi` uses), never the 0-10000 ownership HHI.
+    """
+    book = _book(
+        positions=[
+            Position("AAA", 100.0, 400.0, SWING, last=400.0, sector="Technology"),
+            Position("AAPL", 100.0, 600.0, SWING, last=600.0, sector="Technology"),
+        ]
+    )
+
+    assert book.cluster_exposure_share() == pytest.approx(1.0)
+    assert book.cluster_exposure_share("Technology") == pytest.approx(1.0)
+    # an unmapped key is UNKNOWN, not an empty cluster
+    assert book.cluster_exposure_share("Energy") is None
+
+
+def test_cluster_exposure_share_splits_two_clusters_and_refuses_without_equity():
+    tech = Position("AAA", 100.0, 300.0, SWING, last=300.0, sector="Technology")  # 30_000
+    energy = Position("BBB", 100.0, 100.0, SWING, last=100.0, sector="Energy")  # 10_000
+    book = _book(positions=[tech, energy])
+
+    assert book.cluster_exposure_share() == pytest.approx(0.30)
+    assert book.cluster_exposure_share("Energy") == pytest.approx(0.10)
+    # no equity -> the denominator is unmeasurable
+    assert BookState(equity=0.0, cash=0.0, positions=(tech,)).cluster_exposure_share() is None
+    # no positions -> no cluster to take a share of
+    assert _book().cluster_exposure_share() is None
+
+
 # --- routing ---------------------------------------------------------------
 
 

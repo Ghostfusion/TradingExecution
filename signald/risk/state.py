@@ -114,6 +114,31 @@ class BookState:
             out[key] = out.get(key, 0.0) + p.notional
         return out
 
+    def cluster_exposure_share(self, key: str | None = None) -> float | None:
+        """One cluster's share of book equity, on a 0..1 scale (RISK-7/RISK-12).
+
+        The engine's `risk_score.CATEGORIES` declares `cluster_exposure_share`
+        against this board's own arithmetic - ``cluster_notional / equity`` - and
+        until now nothing returned it, so the number stayed an externally
+        supplied input. It is the PINNED PROXY: a notional share of the book,
+        **never a correlation coefficient**, and on the same 0..1 scale as
+        ``portfolio_hhi`` - never ``ownership_hhi``'s 0-10000.
+
+        ``key=None`` returns the LARGEST cluster's share (the concentration
+        read); a named key returns that cluster's own share. ``None`` when
+        equity is unmeasurable (never 0.0), or when no position maps to the key:
+        an absent cluster and an empty cluster are different facts.
+        """
+        if self.equity <= 0:
+            return None
+        notional = self.cluster_notional()
+        if key is not None:
+            value = notional.get(key)
+            return None if value is None else float(value) / self.equity
+        if not notional:
+            return None
+        return max(notional.values()) / self.equity
+
     def count(self, sleeve: str | None = None) -> int:
         if sleeve is None:
             return len(self.positions)
