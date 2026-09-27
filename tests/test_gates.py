@@ -109,6 +109,39 @@ def test_quote_age_is_measured_not_skewed_by_the_host_zone(mandate):
     assert ctx.market.quote_age_s == pytest.approx(1800, abs=1)
 
 
+def test_build_context_carries_the_artifacts_net_beta_into_the_book(mandate):
+    """RISK-4/PLAN-7: BookState.net_beta is the artifact's number, not 0."""
+    from signald.config import Config
+    from signald.gates import build_context
+
+    rd, contract, state = _components(mandate, _doc(net_beta=-0.42))
+    assert rd.net_beta == -0.42
+
+    ctx = build_context(rd, contract, mandate, _ref(), state, NOW, Config())
+
+    assert ctx.book.net_beta == -0.42
+
+
+def test_build_context_leaves_net_beta_none_when_the_artifact_omits_it(mandate):
+    """Unknown stays None, never a fabricated flat book (0.0)."""
+    from signald.config import Config
+    from signald.gates import build_context
+
+    rd, contract, state = _components(mandate, _doc())
+
+    ctx = build_context(rd, contract, mandate, _ref(), state, NOW, Config())
+
+    assert ctx.book.net_beta is None
+
+
+def test_the_body_parser_rejects_a_non_numeric_net_beta():
+    from signald.schema import ContractError
+
+    doc = _doc(net_beta="high")
+    with pytest.raises(ContractError):
+        parse_research_decision(doc)
+
+
 def test_cash_below_reserve_blocks(mandate):
     rd, contract, state = _components(mandate)
     g = evaluate(rd, contract, mandate, _ref(cash=1000.0), state, NOW)

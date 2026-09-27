@@ -2,6 +2,27 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-27 — the artifact's `net_beta` now reaches `BookState.net_beta` (RISK-4/PLAN-7)
+
+The research artifact (`research_decision.json`) declares a book net beta `sum(w_i*beta_i)` as a new
+**envelope** key (schema `1.2.0`), and this repo was the missing *writer* — `BookState.net_beta` was declared
+with a `0.0` default and every construction site omitted it, so a reader could not tell "flat book" from "not
+measured".
+
+- **`signald/schema.py`** parses/validates it into `ResearchDecision.net_beta` (a number or `None`; a
+  non-numeric value raises `ContractError`), and the field is removed from the `extra` catch-all.
+- **`signald/contracts.py`** rejects a non-numeric `net_beta` at the boundary (`invalid_net_beta`), the same
+  fail-closed shape as `opportunity_score`.
+- **`signald/gates.py::build_context`** carries `rd.net_beta` onto the decision's `BookState` (the book the
+  house gate reads), and **`signald/engine.py::book_with_trades`** propagates it so a re-derived book does not
+  drop it. `contracts/research_decision.v1.schema.json` was refreshed byte-identical to the engine's vendored
+  copy.
+- `None` means unknown, **never `0.0`**: an artifact that omits the field (or ships `null`, which the engine
+  does today — its run state has no configured-basket beta producer) leaves `BookState.net_beta` `None`.
+- Tests: `tests/test_gates.py` (build_context carries the number / leaves `None` / parser rejects a string) and
+  `tests/test_contracts.py` (boundary accepts a numeric, rejects a non-numeric). Affected suites and
+  `ruff check` green.
+
 ## 2026-09-25 — the close window is now named in the scan, and the lint step is green again
 
 The owner's playbook asks for the decision run at **15:45–15:55 ET** ("act on the

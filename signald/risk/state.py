@@ -74,11 +74,10 @@ class BookState:
     five_day_pct: float = 0.0
     drawdown_pct: float = 0.0
     peak_equity: float | None = None
-    #: Net book beta. **No producer populates this yet** - the field was
-    #: declared with a `0.0` default and every construction site omitted it, so
-    #: a reader could not tell "zero beta" from "not measured" (an NA-as-zero
-    #: defect). It is `None` until something computes it (per-name beta x
-    #: position weight); `None` means unknown, never flat.
+    #: Net book beta `sum(w_i*beta_i)`. The research artifact is its producer
+    #: (RISK-4/PLAN-7): ``gates.build_context`` fills it from
+    #: ``ResearchDecision.net_beta``, so a ``0.0`` here is a measured flat book
+    #: and ``None`` means unknown - never the NA-as-zero the field used to have.
     net_beta: float | None = None
     trades_today: dict[str, int] = field(default_factory=dict)
     sleeve_trades_today: dict[str, int] = field(default_factory=dict)

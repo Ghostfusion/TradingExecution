@@ -241,6 +241,22 @@ def test_opportunity_score_range_is_enforced(bad):
     assert exc.value.reason_code == "invalid_opportunity_score"
 
 
+# --- net beta (RISK-4/PLAN-7) ----------------------------------------------
+def test_a_numeric_net_beta_passes_the_boundary_and_parses():
+    from signald.schema import parse_research_decision
+
+    doc = _rehash(v11(net_beta=-0.42))
+    validate_envelope(doc, now=NOW)
+    assert parse_research_decision(doc).net_beta == -0.42
+
+
+@pytest.mark.parametrize("bad", ["high", [1], {"x": 1}])
+def test_a_non_numeric_net_beta_is_rejected(bad):
+    with pytest.raises(EnvelopeError) as exc:
+        validate_envelope(_rehash(v11(net_beta=bad)), now=NOW)
+    assert exc.value.reason_code == "invalid_net_beta"
+
+
 # --- dead-letter -----------------------------------------------------------
 def test_dead_letter_writes_payload_and_reason_sidecar(tmp_path):
     source = tmp_path / "decisions" / "NVDA.json"

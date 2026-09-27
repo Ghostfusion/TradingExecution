@@ -161,6 +161,7 @@ Additive to today's `schema_version: 1` (current `ResearchDecision` keeps every 
   "rating": "Overweight",
   "direction": "add",
   "opportunity_score": 84,
+  "net_beta": null,
   "confidence": 0.72,
   "thesis": "…",
   "rationale": "…",
@@ -178,7 +179,9 @@ Additive to today's `schema_version: 1` (current `ResearchDecision` keeps every 
 ```
 
 Rules: `risk_context` is **advisory** and may never set `trade_permission`; `opportunity_score` is
-producer-owned (0–100); unproducible fields are `null` and the artifact is not emitted (fail closed).
+producer-owned (0–100); `net_beta` (RISK-4/PLAN-7) is producer-owned and is the signed book beta
+`sum(w_i*beta_i)`, stored on `BookState.net_beta` (`null` = unknown, never `0.0`); unproducible fields are
+`null` and the artifact is not emitted (fail closed).
 
 ### 2.3 Field mapping — today → v2
 
@@ -189,6 +192,7 @@ producer-owned (0–100); unproducible fields are `null` and the artifact is not
 | `ResearchDecision.extra` catch-all | explicit fields + `extra` retained | additive |
 | `SignalContract.action` | same (BUY/HOLD/REDUCE/EXIT/NONE) | unchanged |
 | `SignalContract.{score, confidence}` | `opportunity_score`, `confidence` | score becomes 0–100 and is producer-owned |
+| — | `net_beta` | new; producer-owned book beta, parsed into `ResearchDecision.net_beta` and carried on `BookState.net_beta` |
 | — | `sleeve` (`swing`\|`intraday`) | new; set by the router, never by the producer |
 | — | `trade_permission` (`ALLOW`\|`REDUCE`\|`BLOCK`) | new; **gate-owned** |
 | — | `binding_gate`, `permission_reason_code`, `permission_reason` | new; gate-owned |

@@ -123,6 +123,9 @@ def build_context(
         es_pct=0.0,
         sleeve_trades_today={request.sleeve: signals_today},
         trades_today={},
+        # The artifact's book net beta (RISK-4/PLAN-7): populated from the
+        # research decision, `None` (never `0.0`) when the producer omitted it.
+        net_beta=rd.net_beta,
     )
     market = MarketState(
         symbol=contract.symbol,

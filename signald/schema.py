@@ -78,6 +78,9 @@ class ResearchDecision:
     extra: dict[str, Any] = field(default_factory=dict)
     # --- v1.1 producer contract (additive; empty on a Phase-A artifact) ---
     opportunity_score: float | None = None
+    #: Book net beta `sum(w_i*beta_i)` (RISK-4/PLAN-7); the engine's artifact
+    #: supplies it, `None` means unknown (never a flat `0.0`). Unbounded in sign.
+    net_beta: float | None = None
     expires_at: datetime | None = None
     produced_at: datetime | None = None
     idempotency_key: str | None = None
@@ -186,7 +189,7 @@ def parse_research_decision(raw: dict[str, Any]) -> ResearchDecision:
         "thesis", "rationale", "recommended_allocation_pct", "position",
         "data_quality", "price_caliber", "invalidations", "guardrail_reason",
         "risk_gate", "disclosure", "decision_hash", "opportunity_score",
-        "expires_at", "produced_at", "idempotency_key", "producer",
+        "net_beta", "expires_at", "produced_at", "idempotency_key", "producer",
         "artifact_sha256", "risk_context",
     }}
 
@@ -215,6 +218,7 @@ def parse_research_decision(raw: dict[str, Any]) -> ResearchDecision:
         decision_hash=computed_hash,
         extra=extra,
         opportunity_score=_coerce_float(raw.get("opportunity_score"), "opportunity_score"),
+        net_beta=_coerce_float(raw.get("net_beta"), "net_beta"),
         expires_at=_coerce_ts(raw.get("expires_at"), "expires_at"),
         produced_at=_coerce_ts(raw.get("produced_at"), "produced_at"),
         idempotency_key=str(raw.get("idempotency_key") or "") or None,

@@ -226,6 +226,17 @@ def validate_envelope(raw: dict[str, Any], *, now: datetime) -> tuple[int, int, 
                 f"opportunity_score {score_f} outside 0..100 (producer-owned scale)",
             )
 
+    # `net_beta` (RISK-4/PLAN-7) is a signed, unbounded book beta: only
+    # number-ness is checkable here (the body parser coerces it too).
+    beta = raw.get("net_beta")
+    if beta is not None:
+        try:
+            float(beta)
+        except (TypeError, ValueError) as exc:
+            raise EnvelopeError(
+                "invalid_net_beta", f"net_beta is not a number: {beta!r}"
+            ) from exc
+
     strict_stamps = is_v11(version)  # an offset-free stamp is not acceptable on the wire
     expired = (
         _parse_iso(raw.get("expires_at"), "expires_at", require_offset=strict_stamps)

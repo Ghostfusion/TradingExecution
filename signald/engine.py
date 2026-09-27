@@ -400,6 +400,7 @@ class SessionEngine:
             drawdown_pct=self.book.drawdown_pct,
             trades_today=merged,
             sleeve_trades_today={INTRADAY: sum(self._trades_today.values())},
+            net_beta=self.book.net_beta,
         )
 
     def _adv_shares(self, symbol: str) -> float | None:

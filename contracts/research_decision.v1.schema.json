@@ -29,6 +29,14 @@
       "maximum": 100,
       "description": "Producer-owned 0-100 scale (orthogonal to trade_permission)."
     },
+    "net_beta": {
+      "type": ["number", "null"],
+      "description": "Book net beta sum(w_i*beta_i) (RISK-4/PLAN-7); unbounded in sign and magnitude. Null, never 0, when no producer supplies it - see net_beta_reason."
+    },
+    "net_beta_reason": {
+      "type": ["string", "null"],
+      "description": "Producer-owned explanation when net_beta is null by decision."
+    },
     "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
     "thesis": {"type": ["string", "null"]},
     "rationale": {"type": ["string", "null"]},
