@@ -2,6 +2,25 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-28 — the promotion queue is readable from `signald status`
+
+`mandate_candidates.jsonl` was visible only by opening the file: a strongly-rated buy the mandate bars was
+queued, audited and paged, and then the operator still had to know where the JSONL lived to see the queue.
+`signald status` now prints it, above the hold ledger.
+
+Each line names the exact command the Discord card carries. The point of the queue is that a human promotes
+it, so the read-out has to be actionable rather than a bare count:
+
+```
+candidates (promotable, outside the mandate): 1
+  NFLX BUY (Buy) -> signald mandate-add NFLX  @2026-09-28T12:00:00
+```
+
+Newest five, matching the hold ledger. `signald/cli.py::_candidate_summary` is pure, so the wording is
+testable without a terminal. Tests: `tests/test_cli.py` (3) — the read-out end-to-end through
+`cli.main(["status", ...])` with both ledgers seeded, the both-empty case, and the command-plus-cap unit test.
+Full suite 1136 green.
+
 ## 2026-09-28 — every HOLD is recorded, in the mandate or out of it (owner instruction)
 
 A `hold` carries information even when it is not tradable, and the mandate gate used to end the story one of
@@ -25,8 +44,8 @@ only, so `_offer_candidate` ignores it), and nothing durable that said research 
   as its own HOLD signal when it passes, or as that gate's error card when it does not — so paging here as well
   would duplicate them. The event carries no `signald mandate-add` command: a hold is not a promotion request.
 - **`signald status`** prints the ledger: total holds, how many are outside the mandate, and the newest five.
-  Folded into `status` rather than given its own subcommand — the candidate queue has no command either, and
-  this is a read-out.
+  Folded into `status` rather than given its own subcommand — it is a read-out, and the promotion queue is
+  shown beside it (see the entry above).
 - **One defect, found by the live smoke and fixed in the same pass.** The audit sentence and the `status` line
   both derived which side of the mandate a hold was on from `blocked`, so an in-mandate hold refused by some
   *other* gate was recorded and printed as "outside the mandate" — measured live against the owner's own

@@ -26,7 +26,7 @@ from .mandate import DEFAULT_MANDATE, MandateError, load_mandate, write_mandate
 from .notifier import Notifier
 from .processor import SignalProcessor
 from .samples import write_sample
-from .stores import AuditChain, Journal, MonitorStore, SignalStore
+from .stores import AuditChain, CandidateStore, Journal, MonitorStore, SignalStore
 from .watch import WatchLoop
 from .watchdog import DEFAULT_MAX_AGE_S, check_heartbeat
 
@@ -178,6 +178,26 @@ def _monitor_summary(rows: list[dict]) -> list[str]:
     return lines
 
 
+def _candidate_summary(rows: list[dict]) -> list[str]:
+    """The promotion queue as status lines.
+
+    ``CandidateStore`` holds strongly-rated names the mandate bars that the
+    account provably does not hold - the executor never widens its own mandate.
+    Unlike the hold ledger every row here is actionable and already carries a
+    promotion command, so each line names the exact one. The same command the
+    Discord card carries, for an operator reading a terminal instead.
+    """
+    if not rows:
+        return ["candidates (promotable, outside the mandate): 0"]
+    lines = [f"candidates (promotable, outside the mandate): {len(rows)}"]
+    for c in rows[-5:]:
+        lines.append(
+            f"  {c.get('ticker')} {c.get('action')} ({c.get('rating')}) -> "
+            f"signald mandate-add {c.get('ticker')}  @{c.get('at')}"
+        )
+    return lines
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     ov = _state_overrides(args)
     if args.watch:
@@ -197,6 +217,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         last = signals[-1]
         print(f"last: {last['signal_id']} {last['ticker']} {last['action']} "
               f"@{last['emitted_at']} verdict={last['gates']['verdict']}")
+    # The promotion queue first (it is the actionable one), then the hold
+    # ledger. Both are read-outs, so both live in `status` rather than in
+    # subcommands of their own.
+    path = cfg.data_dir / "mandate_candidates.jsonl"
+    for line in _candidate_summary(CandidateStore(path).read_all()):
+        print(line)
     # The hold ledger (owner instruction 2026-09-28): every HOLD decision, in
     # the mandate or not. Folded into `status` rather than given its own
     # subcommand - it is a read-out, and the candidate queue has no command

@@ -48,7 +48,9 @@ order without a mandate; research is advisory, execution is committed.
   symbol is in the mandate, with `blocked`/`in_mandate` on the row, and only the
   out-of-mandate case pages (an in-mandate hold already sends its own HOLD
   signal). The ledger is a read-out, never tradability: a blocked hold stays
-  blocked. `signald mandate-add` /
+  blocked. Both ledgers are readable from the terminal — `signald status` prints
+  the promotion queue (each row carrying its `mandate-add` command) above the
+  hold ledger, newest five each. `signald mandate-add` /
   `mandate-remove` re-sign and archive the mandate (atomically), and a running
   daemon hot-reloads the change on its next poll (`mandate_reloaded`).
 - Design contract: [`../EXECUTION_IMPLEMENTATION_PLAN.md`](../EXECUTION_IMPLEMENTATION_PLAN.md)

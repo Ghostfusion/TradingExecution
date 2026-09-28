@@ -258,3 +258,65 @@ def test_verify_defaults_to_the_configured_ledger(tmp_path, capsys):
     rc = cli.main(["verify", "--data", str(data)])
 
     assert rc == 0 and "OK" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# `status` read-outs: the promotion queue and the hold ledger
+# --------------------------------------------------------------------------
+def test_status_shows_the_promotion_queue_and_the_hold_ledger(tmp_path, capsys):
+    """Both read-outs reach the terminal, not only the files.
+
+    `mandate_candidates.jsonl` was visible only by opening it. The operator
+    should not need to know where the ledger lives, and a candidate row is
+    actionable - it already carries the command that promotes it.
+    """
+    from signald.stores import CandidateStore, MonitorStore
+
+    data = tmp_path / "signals"
+    data.mkdir()
+    CandidateStore(data / "mandate_candidates.jsonl").record(
+        ticker="NFLX", rating="Buy", action="BUY", decision_hash="sha256:aaa",
+        target_pct=0.03, stop=74.92, run_id="run-1", at="2026-09-28T12:00:00",
+    )
+    MonitorStore(data / "monitor.jsonl").record(
+        ticker="NVDA", rating="Underweight", action="HOLD", decision_hash="sha256:bbb",
+        in_mandate=True, blocked=True, binding_gate="data", run_id="run-1",
+        at="2026-09-28T12:00:01",
+    )
+
+    rc = cli.main(["status", "--data", str(data)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "candidates (promotable, outside the mandate): 1" in out
+    assert "signald mandate-add NFLX" in out, out
+    assert "monitors (holds): 1 | outside the mandate: 0" in out
+    assert "NVDA HOLD (Underweight) - inside the mandate (blocked)" in out
+
+
+def test_status_says_zero_when_both_ledgers_are_empty(tmp_path, capsys):
+    data = tmp_path / "signals"
+    data.mkdir()
+
+    rc = cli.main(["status", "--data", str(data)])
+
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "candidates (promotable, outside the mandate): 0" in out
+    assert "monitors (holds): 0" in out
+
+
+def test_the_candidate_summary_names_the_command_and_shows_only_the_newest_five():
+    from signald.cli import _candidate_summary
+
+    rows = [
+        {"ticker": f"T{i}", "action": "BUY", "rating": "Buy", "at": "2026-09-28T12:00:00"}
+        for i in range(8)
+    ]
+
+    lines = _candidate_summary(rows)
+
+    assert lines[0] == "candidates (promotable, outside the mandate): 8"
+    assert len(lines) == 6, "a header plus the newest five"
+    assert "signald mandate-add T7" in lines[-1]
+    assert not any("T0" in ln for ln in lines[1:]), "the oldest rows are dropped"

@@ -185,7 +185,7 @@ TradingExecution/
 │   │                   (default mode paper; --execute still gates the order path)
 │   ├── control.py      hosts the control surfaces (local state + halt; no order effects)
 │   └── samples.py      demo research_decision.json generator
-└── tests/             1133 hermetic tests (zero network; ambient TRADINGEXEC_*/ALPACA_* stripped)
+└── tests/             1136 hermetic tests (zero network; ambient TRADINGEXEC_*/ALPACA_* stripped)
 ```
 
 Quick loop: `py -3.12 -m pytest tests/ -q -p no:cacheprovider`;

@@ -145,8 +145,10 @@ A hold on a stock you *are* allowed to trade never sends this card: you already
 hear about it — its normal signal when it passes, or the refusal notice when a
 rule stops it — so a second card would just be the same hold twice.
 
-To see them all, run `signald status` (§9): it prints how many holds are on file,
-how many are outside your list, and the newest five.
+To see them all, run `signald status` (§9). It prints two lists: the **candidates**
+— stocks research rates a buy that your list bars, each with the exact promotion
+command — and the **holds**, with how many are outside your list and the newest
+five of each.
 
 ## 6. Where you see signals
 
@@ -209,10 +211,11 @@ leave it running:
 py -3.12 -m signald run --execute
 ```
 
-Six more commands exist for checking, for your symbol list, and for emergencies
+Seven more commands exist for checking, for your symbol list, and for emergencies
 (all safe to run):
 
 ```
+py -3.12 -m signald status                    # what is on file: signals, candidates, holds
 py -3.12 -m signald probe                     # would the executor accept the newest research file?
 py -3.12 -m signald simulate --symbol AVGO --price 100 --stop 95 --at 09:45
                                               # what would the risk gate say about this trade?
