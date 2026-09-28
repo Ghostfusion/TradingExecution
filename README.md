@@ -43,7 +43,12 @@ order without a mandate; research is advisory, execution is committed.
   from a mid-session one; the window adds no scanning and `0` disables it. A
   strongly-rated buy the mandate bars is never
   auto-widened: it lands in `<data>/mandate_candidates.jsonl`, in the audit, and
-  as a candidate card naming the exact promotion command. `signald mandate-add` /
+  as a candidate card naming the exact promotion command. A **hold** is recorded
+  too — every HOLD decision lands in `<data>/monitor.jsonl` whether or not the
+  symbol is in the mandate, with `blocked`/`in_mandate` on the row, and only the
+  out-of-mandate case pages (an in-mandate hold already sends its own HOLD
+  signal). The ledger is a read-out, never tradability: a blocked hold stays
+  blocked. `signald mandate-add` /
   `mandate-remove` re-sign and archive the mandate (atomically), and a running
   daemon hot-reloads the change on its next poll (`mandate_reloaded`).
 - Design contract: [`../EXECUTION_IMPLEMENTATION_PLAN.md`](../EXECUTION_IMPLEMENTATION_PLAN.md)

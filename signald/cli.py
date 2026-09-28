@@ -26,7 +26,7 @@ from .mandate import DEFAULT_MANDATE, MandateError, load_mandate, write_mandate
 from .notifier import Notifier
 from .processor import SignalProcessor
 from .samples import write_sample
-from .stores import AuditChain, Journal, SignalStore
+from .stores import AuditChain, Journal, MonitorStore, SignalStore
 from .watch import WatchLoop
 from .watchdog import DEFAULT_MAX_AGE_S, check_heartbeat
 
@@ -154,6 +154,30 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _monitor_summary(rows: list[dict]) -> list[str]:
+    """The hold ledger as status lines.
+
+    Both the count and the wording key on ``in_mandate``, NEVER on ``blocked``.
+    An in-mandate hold can still be blocked - on another gate - and calling that
+    "outside the mandate" is false. That conflation was a real defect, twice
+    (processor audit sentence, then this line), found by the 2026-09-28 live
+    smoke against the owner's own mandate: NVDA, ``in_mandate=True`` blocked on
+    ``data``, was counted and printed as "outside the mandate".
+    """
+    if not rows:
+        return ["monitors (holds): 0"]
+    outside = sum(1 for m in rows if not m.get("in_mandate"))
+    lines = [f"monitors (holds): {len(rows)} | outside the mandate: {outside}"]
+    for m in rows[-5:]:
+        where = "inside" if m.get("in_mandate") else "outside"
+        note = " (blocked)" if m.get("blocked") else ""
+        lines.append(
+            f"  {m.get('ticker')} HOLD ({m.get('rating')}) - {where} the mandate"
+            f"{note} @{m.get('at')}"
+        )
+    return lines
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     ov = _state_overrides(args)
     if args.watch:
@@ -173,6 +197,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         last = signals[-1]
         print(f"last: {last['signal_id']} {last['ticker']} {last['action']} "
               f"@{last['emitted_at']} verdict={last['gates']['verdict']}")
+    # The hold ledger (owner instruction 2026-09-28): every HOLD decision, in
+    # the mandate or not. Folded into `status` rather than given its own
+    # subcommand - it is a read-out, and the candidate queue has no command
+    # either.
+    for line in _monitor_summary(MonitorStore(cfg.data_dir / "monitor.jsonl").read_all()):
+        print(line)
     return 0
 
 

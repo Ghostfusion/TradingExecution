@@ -136,6 +136,24 @@ class Notifier:
                             "description": event.get("decision_hash", ""),
                             "fields": fields}],
             }
+        if kind == "monitor":
+            ticker = event.get("ticker", "?")
+            content = (
+                f"⏸ {ticker} **HOLD** — outside the mandate, so it is recorded for "
+                f"monitoring and stays untradable."
+            )
+            fields = []
+            for key, label in (("rating", "rating"), ("binding_gate", "gate"),
+                               ("run_id", "run")):
+                v = event.get(key)
+                if v is not None:
+                    fields.append({"name": label, "value": str(v), "inline": True})
+            return {
+                "content": content,
+                "embeds": [{"title": f"{ticker} monitor (hold)",
+                            "description": event.get("decision_hash", ""),
+                            "fields": fields}],
+            }
         detail = event.get("detail") or event.get("reason") or event.get("source") or ""
         return {"content": f"{kind}: {detail}"}
 
@@ -166,6 +184,35 @@ class Notifier:
             "stop": stop,
             "run_id": run_id,
             "command": f"signald mandate-add {str(ticker).upper()}",
+        }
+
+    def monitor_event(
+        self,
+        *,
+        ticker: str,
+        rating: str,
+        decision_hash: str,
+        binding_gate: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
+        """A HOLD the mandate bars: recorded, and deliberately not promotable.
+
+        The in-mandate hold needs no page of its own - its HOLD ``signal_event``
+        already goes out - so this event exists for the case that used to
+        disappear entirely. It carries no ``signald mandate-add`` command on
+        purpose: a hold is not a promotion request, and the candidate queue stays
+        the buy/overweight-only one.
+        """
+        return {
+            "event": "monitor",
+            "ts": self._now().isoformat(timespec="seconds"),
+            "ticker": str(ticker).upper(),
+            "action": "HOLD",
+            "rating": rating,
+            "decision_hash": decision_hash,
+            "binding_gate": binding_gate,
+            "run_id": run_id,
+            "note": "recorded for monitoring; outside the mandate, so not tradable",
         }
 
     def error_event(self, source: str, detail: str) -> dict[str, Any]:

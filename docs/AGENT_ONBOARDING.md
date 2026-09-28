@@ -169,13 +169,15 @@ TradingExecution/
 │   ├── normalizer.py   (build_signal_contract in schema.py) research→agnostic signal
 │   ├── gates.py        fail-closed gates (§4.4 list), reference completeness
 │   ├── alpaca_ref.py   reference reads via injectable transport seam (no orders)
-│   ├── stores.py       signals.jsonl/latest.json, journal, SHA-256 audit chain
+│   ├── stores.py       signals.jsonl/latest.json, journal, SHA-256 audit chain,
+│   │                   mandate_candidates.jsonl, monitor.jsonl (the hold ledger)
 │   ├── notifier.py     webhook events, journal-first, never raises
 │   ├── kill_switch.py  sentinel + persisted HALT episode latch
 │   ├── watch.py        poll loop (decisions/) — regular-session scan window
 │   │                   (scan_rth_only + broker-clock check), --once overrides
 │   ├── processor.py    pipeline: validate→precheck→idempotency→ref→gates→envelope→persist;
-│   │                   refresh_mandate (hot reload), mandate candidates queue
+│   │                   refresh_mandate (hot reload), mandate candidates queue,
+│   │                   hold ledger (_record_monitor: every HOLD, in or out)
 │   ├── daemon.py       PID lockfile + heartbeat
 │   ├── cli.py          run · verify · status · sample · approve · init-mandate ·
 │   │                   notify-test · watchdog · probe · simulate · halt ·
@@ -183,7 +185,7 @@ TradingExecution/
 │   │                   (default mode paper; --execute still gates the order path)
 │   ├── control.py      hosts the control surfaces (local state + halt; no order effects)
 │   └── samples.py      demo research_decision.json generator
-└── tests/             1102 hermetic tests (zero network; ambient TRADINGEXEC_*/ALPACA_* stripped)
+└── tests/             1133 hermetic tests (zero network; ambient TRADINGEXEC_*/ALPACA_* stripped)
 ```
 
 Quick loop: `py -3.12 -m pytest tests/ -q -p no:cacheprovider`;

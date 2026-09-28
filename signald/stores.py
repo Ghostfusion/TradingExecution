@@ -309,6 +309,86 @@ class CandidateStore:
         return self._rows()
 
 
+class MonitorStore:
+    """Hold names worth watching: every hold decision, in-mandate or not.
+
+    Owner instruction 2026-09-28. A ``hold`` carries information even when it is
+    not tradable, and the mandate gate used to end the story one of two ways: an
+    in-mandate hold emitted a HOLD signal (visible), while a name the mandate
+    bars was REFUSED and then dropped - research said "hold" and nothing durable
+    recorded it. This ledger keeps both, so the operator can see what research is
+    holding instead of only what it is allowed to trade.
+
+    Deliberately **not** a signal and **not** tradability: nothing here reaches
+    the signal store, the gate or the order path, and an out-of-mandate hold is
+    exactly as untradable as it was before this ledger existed.
+
+    Append-only JSONL under the data dir, one row per ``(ticker,
+    decision_hash)`` - the 10 s poll re-discovers artifacts, so the dedupe is
+    what keeps the ~26k reprints of the 2026-09-16 stall out of this file.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def _rows(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        rows = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return rows
+
+    def has(self, ticker: str, decision_hash: str) -> bool:
+        t = str(ticker).upper()
+        return any(r.get("ticker") == t and r.get("decision_hash") == decision_hash
+                   for r in self._rows())
+
+    def record(
+        self,
+        *,
+        ticker: str,
+        rating: str,
+        action: str,
+        decision_hash: str,
+        in_mandate: bool,
+        blocked: bool,
+        binding_gate: str | None = None,
+        run_id: str | None = None,
+        at: str,
+    ) -> dict[str, Any]:
+        """Append one monitor row; idempotent per ``(ticker, decision_hash)``.
+
+        ``in_mandate`` and ``blocked`` are RECORDED rather than inferred: the
+        same hold reads differently when the name is tradable ("holding what I
+        own") and when the mandate bars it ("research likes it, I cannot buy
+        it"), and a reader must not have to reconstruct which one this row was.
+        """
+        row: dict[str, Any] = {
+            "type": "monitor",
+            "ticker": str(ticker).upper(),
+            "rating": str(rating),
+            "action": str(action),
+            "decision_hash": decision_hash,
+            "in_mandate": bool(in_mandate),
+            "blocked": bool(blocked),
+            "binding_gate": binding_gate,
+            "run_id": run_id,
+            "at": at,
+        }
+        _atomic_append(self.path, json.dumps(row, sort_keys=True) + "\n")
+        return row
+
+    def read_all(self) -> list[dict[str, Any]]:
+        return self._rows()
+
+
 def _parse_ts(v: Any) -> datetime | None:
     if not v:
         return None

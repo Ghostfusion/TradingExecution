@@ -125,6 +125,29 @@ sends a candidate card instead of a signal:
 
 Run that command if you agree (see §9). Ignore the card and nothing changes.
 
+### ⏸ A third kind of notice: a hold you can't trade
+
+Your allowed list decides what is *tradable* — but research still forms an
+opinion about the rest of the market, and a **hold** used to be thrown away
+simply because the symbol was not in your list.
+
+Now every hold is written down, and when the symbol is **not** in your allowed
+list you also get a card:
+
+> ⏸ **NFLX HOLD** — outside the mandate, so it is recorded for monitoring and
+> stays untradable.
+
+Read it as "research looked at this and said: do nothing". It is **not** a
+reason to buy, and nothing about your rules changes when one arrives — the stock
+stays exactly as untradable as it was before the card existed.
+
+A hold on a stock you *are* allowed to trade never sends this card: you already
+hear about it — its normal signal when it passes, or the refusal notice when a
+rule stops it — so a second card would just be the same hold twice.
+
+To see them all, run `signald status` (§9): it prints how many holds are on file,
+how many are outside your list, and the newest five.
+
 ## 6. Where you see signals
 
 - **Discord** — instant notifications (what you're set up with now)

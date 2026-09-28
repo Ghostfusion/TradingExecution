@@ -2,6 +2,44 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-28 — every HOLD is recorded, in the mandate or out of it (owner instruction)
+
+A `hold` carries information even when it is not tradable, and the mandate gate used to end the story one of
+two ways: an **in-mandate** hold emitted a HOLD signal (visible), while a hold on a name the mandate bars was
+**refused and then dropped** — no signal (correctly), no queue entry (`PROMOTABLE_RATINGS` is buy/overweight
+only, so `_offer_candidate` ignores it), and nothing durable that said research had said "hold".
+
+- **`signald/stores.py::MonitorStore`** — an append-only `monitor.jsonl` under the data dir, one row per
+  `(ticker, decision_hash)`, mirroring `CandidateStore`. The row records `in_mandate` and `blocked` rather than
+  leaving them to be inferred: the same hold reads differently when the name is tradable ("holding what I own")
+  and when the mandate bars it ("research likes it, I cannot buy it").
+- **`signald/processor.py::_record_monitor`** writes it on **both** paths — after the refusal audit in the
+  BLOCK branch and after the envelope on the emitted path — so the ledger holds every hold regardless of
+  mandate membership. It fires on `contract.action == "HOLD"` only, dedupes on `(ticker, decision_hash)`, and
+  is written before the `--dry-run` return, exactly like the candidate queue: it records what research said,
+  it is not a trading side effect.
+- **Not tradability.** Nothing on this path touches the signal store, the gate or the order path — a blocked
+  hold stays blocked and its `envelope` stays `None`. That is the invariant the tests are built around.
+- **`signald/notifier.py::monitor_event`** plus a `discord_event` branch, paged only when the hold is blocked
+  **and** the symbol is outside the mandate. The other two cases already reach the operator — an in-mandate hold
+  as its own HOLD signal when it passes, or as that gate's error card when it does not — so paging here as well
+  would duplicate them. The event carries no `signald mandate-add` command: a hold is not a promotion request.
+- **`signald status`** prints the ledger: total holds, how many are outside the mandate, and the newest five.
+  Folded into `status` rather than given its own subcommand — the candidate queue has no command either, and
+  this is a read-out.
+- **One defect, found by the live smoke and fixed in the same pass.** The audit sentence and the `status` line
+  both derived which side of the mandate a hold was on from `blocked`, so an in-mandate hold refused by some
+  *other* gate was recorded and printed as "outside the mandate" — measured live against the owner's own
+  mandate: NVDA, `in_mandate=True`, blocked on `data`. The structured field was right and the sentence was not,
+  and the sentence is what an operator reads. Both now key on `in_mandate` and name the binding gate
+  ("inside the mandate, blocked on data"). Pinned twice — `tests/test_monitor.py` covers the audit reason and
+  `_monitor_summary`.
+- Tests: `tests/test_monitor.py` (10) — the store's keying, the out-of-mandate hold recorded *and still
+  untradable*, the in-mandate hold recorded too, a reduce NOT monitored, one row per decision across polls
+  (with the journal dedupe disabled to exercise the store's own), the truthful audit reason for the
+  in-mandate-but-blocked case, the page going only to the mandate-barred case, the status read-out's counting
+  and wording, and the new event rendering a real card instead of the empty generic line.
+
 ## 2026-09-27 — the artifact's `net_beta` now reaches `BookState.net_beta` (RISK-4/PLAN-7)
 
 The research artifact (`research_decision.json`) declares a book net beta `sum(w_i*beta_i)` as a new

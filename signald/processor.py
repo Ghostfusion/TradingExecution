@@ -22,7 +22,7 @@ from .mandate import Mandate, MandateError, load_mandate
 from .notifier import Notifier
 from .schema import ContractError, build_signal_contract, parse_research_decision, sha256_of
 from .sleeves.router import RouteError, route_research
-from .stores import AuditChain, CandidateStore, Journal, SignalStore
+from .stores import AuditChain, CandidateStore, Journal, MonitorStore, SignalStore
 
 #: Ratings (case-insensitive) that make a not-held name worth offering to the
 #: operator. Deliberately narrow: "buy"/"overweight" only, so the queue is the
@@ -66,6 +66,7 @@ class SignalProcessor:
         notifier: Notifier,
         inbox: Inbox | None = None,
         candidates: CandidateStore | None = None,
+        monitors: MonitorStore | None = None,
     ) -> None:
         self.cfg = config
         self.mandate = mandate
@@ -79,6 +80,11 @@ class SignalProcessor:
         #: tests, control surfaces) gets the queue without extra plumbing.
         self.candidates = candidates or CandidateStore(
             Path(config.data_dir) / "mandate_candidates.jsonl"
+        )
+        #: The hold ledger, defaulted the same way so every construction path
+        #: (CLI, tests, control surfaces) gets it without extra plumbing.
+        self.monitors = monitors or MonitorStore(
+            Path(config.data_dir) / "monitor.jsonl"
         )
         self._mandate_hash = mandate.hash
         #: (mtime_ns, size) of the mandate file as last loaded; None forces the
@@ -235,6 +241,10 @@ class SignalProcessor:
                 ticker=rd.ticker, decision_hash=rd.decision_hash,
                 gate_reasons=list(gate.reasons),
             )
+            # The ledger is written before the refusal is announced, so a hold
+            # the mandate bars is recorded even though it produces no signal.
+            self._record_monitor(rd, contract, gate, blocked=True,
+                                 at=now.isoformat(timespec="seconds"))
             if not self._offer_candidate(rd, contract, ref, gate):
                 self._notify_error("signal_blocked", f"{rd.ticker}: {'; '.join(gate.blocked)}")
             if self.inbox is not None and admission is not None:
@@ -258,6 +268,11 @@ class SignalProcessor:
         # 7. envelope
         seq = len(self.store.read_all()) + 1
         envelope = self._build_envelope(rd, contract, gate, ref, seq, now, route.sleeve)
+        # Recorded for every hold, not only the refused ones - and before the
+        # dry-run return, like the candidate queue, because this is a record of
+        # what research said rather than a trading side effect.
+        self._record_monitor(rd, contract, gate, blocked=False,
+                             at=now.isoformat(timespec="seconds"))
 
         # 8. persist + notify
         if self.cfg.dry_run:
@@ -282,6 +297,65 @@ class SignalProcessor:
         if self.inbox is not None and admission is not None:
             self.inbox.commit(admission.key, signal_id=envelope["signal_id"])
         return ProcessResult("emitted", envelope=envelope, reasons=gate.reasons)
+
+    def _record_monitor(self, rd, contract, gate: GateResult, *,
+                        blocked: bool, at: str) -> bool:
+        """Record a HOLD decision in the monitor ledger; True when it was new.
+
+        Owner instruction 2026-09-28: **a hold is recorded whether or not the
+        symbol is in the mandate.** An in-mandate hold already reaches the
+        operator as a HOLD signal, so the case this exists for is the other one -
+        a hold on a name the mandate bars, which the gate refuses and the
+        candidate queue ignores because ``PROMOTABLE_RATINGS`` is buy/overweight
+        only. Before this, research said "hold" and nothing durable said so.
+
+        NOT tradability, and NOT a signal: nothing here touches the signal store,
+        the gate or the order path, and a blocked hold stays exactly as blocked
+        as it was.
+        """
+        if str(contract.action).upper() != "HOLD":
+            return False
+        ticker = str(rd.ticker).upper()
+        if self.monitors.has(ticker, rd.decision_hash):
+            return False
+        producer = rd.extra.get("producer")
+        run_id = producer.get("run_id") if isinstance(producer, dict) else None
+        run_id = run_id or rd.extra.get("run_id")
+        run_id = None if run_id is None else str(run_id)
+        in_mandate = ticker in self.mandate.allowed
+        self.monitors.record(
+            ticker=ticker, rating=str(rd.rating), action=contract.action,
+            decision_hash=rd.decision_hash, in_mandate=in_mandate, blocked=blocked,
+            binding_gate=gate.binding_gate, run_id=run_id, at=at,
+        )
+        # The reason must state BOTH facts, and "blocked" is not "outside the
+        # mandate". Deriving the wording from `blocked` alone said "outside the
+        # mandate" for an in-mandate name blocked on some other gate - measured
+        # live 2026-09-28: NVDA, in_mandate=True, blocked on `data`, audited as
+        # "outside the mandate", which is simply false.
+        where = "inside" if in_mandate else "outside"
+        if not blocked:
+            note = ""
+        else:
+            note = f", blocked on {gate.binding_gate}" if gate.binding_gate else ", blocked"
+        self.audit.append(
+            "monitor",
+            f"{ticker} HOLD ({rd.rating}) - {where} the mandate{note}",
+            ticker=ticker, decision_hash=rd.decision_hash, rating=str(rd.rating),
+            in_mandate=in_mandate, blocked=blocked,
+        )
+        # Page only the hold the MANDATE bars. That is the one whose actionable
+        # question ("should this name be allowed?") has no other outlet, because
+        # the candidate queue is buy/overweight only. The other two cases already
+        # reached the operator: an emitted hold as its own HOLD signal, and an
+        # in-mandate hold blocked on another gate as that gate's error card.
+        if blocked and not in_mandate and self.notifier.enabled:
+            self.notifier.send(self.notifier.monitor_event(
+                ticker=ticker, rating=str(rd.rating),
+                decision_hash=rd.decision_hash, binding_gate=gate.binding_gate,
+                run_id=run_id,
+            ))
+        return True
 
     def _offer_candidate(self, rd, contract, ref: RefData, gate: GateResult) -> bool:
         """Queue a strongly-rated, not-held name the mandate bars; True when queued.
