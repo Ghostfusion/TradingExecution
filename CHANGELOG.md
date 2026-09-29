@@ -27,8 +27,9 @@ against the same `--data` are two processes doing that, so they read the **same*
   the read slowed to widen the read→write gap; fails before the fix (row 1 already CORRUPT, 2/2 runs), passes
   after. Suite 1138 green, ruff clean.
 - **The compaction.** Original archived to `signals/audit/audit.jsonl.pre-dedup-20260929.bak` (unmodified, chain
-  as written), the surviving 1,548 rows re-linked and verified, then one `ledger_compacted` row appended through
-  the normal `AuditChain.append` path — which also proves the re-linked chain is appendable:
+  as written; deleted the same day — see below), the surviving 1,548 rows re-linked and verified, then one
+  `ledger_compacted` row appended through the normal `AuditChain.append` path — which also proves the re-linked
+  chain is appendable:
 
 ```
 153,917 rows / 82.7 MB  ->  1,549 rows / 734 KB     (dropped 152,369 deduped)
@@ -43,8 +44,11 @@ signald verify --audit signals/audit/audit.jsonl  ->  OK — 1549 rows chained
   `./audit/audit.jsonl`, not the ledger the daemon writes (`--data .\signals` → `signals/audit/audit.jsonl`).
   Both printed `OK — 5 rows chained` against a file the daemon never touches. Documented in
   `docs/RUNBOOK.md` (with the compaction procedure) and `docs/AGENT_ONBOARDING.md` §2.
-- **Not deleted:** the 82.7 MB archive stays. It is the only copy of the fork evidence and of everything the
-  daemon decided before today.
+- **Deleted, on the owner's instruction, the same day.** The archive is gone, so its digest is recorded here
+  instead of being checkable — `sha256 2e9ee0f2b8b138ba4de3778351384966a61304bd634612500ef5e5d0a6a9a0c4`,
+  82,664,230 bytes, 153,917 lines. What it held that nothing else does: the 152,369 `deduped` poll-cycle rows,
+  and the original byte ordering the four forks were visible in. The fork evidence is quoted above, and the
+  1,548 rows worth keeping live on in the compacted ledger.
 
 ## 2026-09-29 — a restart is two steps: `schtasks /end` does not stop the daemon
 
