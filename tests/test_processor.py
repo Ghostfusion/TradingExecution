@@ -322,6 +322,28 @@ def test_a_duplicate_artifact_does_not_grow_the_audit_ledger(processor, write_ar
     assert len(audit.read()) == before
 
 
+def test_the_daemons_boundary_does_not_grow_the_ledger_either(
+    cfg, mandate, seam, notifier, write_artifact
+):
+    """The same guarantee through the shape ``cli._build`` actually builds.
+
+    The test above pins a processor built *without* an inbox, which is a shape
+    production never uses. The live daemon exits a re-seen artifact at the inbox
+    instead, so the inbox's own dedupe rows were the writer that kept going
+    after the 2026-09-15 fix: measured 2026-09-29, 151,976 ``deduped`` rows
+    across 72 distinct artifacts, 82 MB of an unprunable chained ledger.
+    """
+    proc, audit, _ = _wired(cfg, mandate, seam, notifier)
+    path = write_artifact(build_sample_v11(ticker="AMZN"))  # outside the mandate
+
+    assert proc.process(path).kind == "blocked"
+
+    before = len(audit.read())
+    for _ in range(5):
+        assert proc.process(path).kind == "skipped_duplicate"
+    assert len(audit.read()) == before
+
+
 def test_restart_recovery_no_duplicate(processor, cfg, write_artifact):
     """Kill and rebuild the daemon: journal replay prevents double emission."""
     p = write_artifact(build_sample())

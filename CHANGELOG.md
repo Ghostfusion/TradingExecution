@@ -2,6 +2,43 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-29 — the inbox's dedupe rows were growing the audit ledger without bound
+
+The 2026-09-15 fix silenced the processor's duplicate skip — "the ledger records decisions, not poll cycles" —
+and it held for that path. It stopped being reachable on **2026-09-18**, when `cli._build` started constructing
+the `Inbox`: a re-seen artifact now exits at the boundary, *before* the `is_processed` guard could return, and
+`Inbox.admit` wrote a `deduped` audit row of its own at each of its three dedupe sites. Measured live on the
+daemon's ledger:
+
+```
+signals/audit/audit.jsonl   153,513 rows, 82.4 MB
+  deduped                   151,976   three reasons, all Inbox._audit_row
+  rejected_invalid            1,327
+  every other kind            1,537
+across 72 distinct artifacts — ~2,110 rows each, ~3,000/hour inside the scan window
+  already dead-lettered (committed)     73,427
+  already admitted (committed)          44,930
+  already dead-lettered (dead_lettered) 33,640
+```
+
+- **`signald/inbox.py`** — the three `_audit_row("deduped", …)` calls are gone. A replay still returns
+  `Admission(DEDUPED, …)`, so the effectively-once invariant is untouched, but it writes nothing: the durable
+  record already exists as the `inbox.jsonl` state row plus the `admitted` / `dead_lettered` ledger row from the
+  first admission. Nothing else in `admit()` changes.
+- **"Never silent" is unaffected.** It covers unreadable, non-compliant, hash-mismatched and expired artifacts
+  (dead-lettered with a `reason_code`) and non-permissible signals (quarantined) — all still audited, once.
+  A poll of an unchanged file is not a decision, which is the distinction the boundary was missing.
+- **Tests** — `tests/test_inbox.py::test_replays_do_not_grow_the_audit_ledger` replaces
+  `test_admission_and_duplicate_are_both_audited`, which pinned the flood; `test_unknown_major_is_dead_lettered`
+  now expects one row rather than two. `tests/test_processor.py::test_the_daemons_boundary_does_not_grow_the_ledger_either`
+  covers the shape production actually builds — the pre-existing no-growth test builds the processor *without* an
+  inbox, which `cli._build` never does. Both new tests fail before the fix (five replays appended five rows;
+  `assert 8 == 3`). Full suite **1137 green**, ruff clean.
+- **Not pruned.** The 82 MB already written stays. The ledger is append-only and SHA-256 chained, so clearing it
+  is a destructive operation on operator state, not a bug fix — flagged for the owner instead.
+- **The running daemon keeps appending until it is restarted**; it holds the pre-fix code. Its heartbeat is live
+  and its scan window is open.
+
 ## 2026-09-28 — the promotion queue is readable from `signald status`
 
 `mandate_candidates.jsonl` was visible only by opening the file: a strongly-rated buy the mandate bars was

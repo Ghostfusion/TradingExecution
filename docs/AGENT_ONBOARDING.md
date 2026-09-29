@@ -76,6 +76,15 @@ Finnhub, vendor chain, analyst tools) do **not** apply here.
    test fixtures that modelled the inbox-less processor are what let this ship.
    Boundary state paths live on `Config` (`inbox_file`, `dead_letter_dir`,
    `quarantine_dir`) and are anchored under `--data`.
+   **The wire must not re-log.** A poll of an unchanged artifact is not a
+   decision: the loop hands every handled artifact back on every cycle, so a row
+   written on the *replay* path grows a hash-chained ledger that cannot be
+   pruned. This has now happened three times — the 2026-09-15 refusal loop, the
+   2026-09-16 `[skipped_duplicate]` log flood, and the 2026-09-29 inbox dedupe
+   rows (151,976 rows / 82 MB across 72 artifacts, ~3,000/hour). Record the
+   decision on the way in; stay silent on the way past. The lesson from the
+   first occurrence generalises: **fix the path, then check every other writer
+   of the same event, and test it through the shape `cli._build` builds.**
 
 ---
 

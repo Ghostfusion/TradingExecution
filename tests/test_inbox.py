@@ -165,7 +165,8 @@ def test_unknown_major_is_dead_lettered(inbox, tmp_path, audit):
     reasons = list(inbox.dead_letter_dir.glob("*.reason.json"))
     assert len(reasons) == 1
     assert json.loads(reasons[0].read_text(encoding="utf-8"))["reason_code"] == "unknown_major"
-    assert [r["kind"] for r in audit.read()] == ["dead_lettered", "deduped"]
+    # The replay writes no row: one dead letter, one `dead_lettered` row, silence.
+    assert [r["kind"] for r in audit.read()] == ["dead_lettered"]
 
 
 def test_expired_artifact_is_dead_lettered(inbox, tmp_path, now):
@@ -224,14 +225,21 @@ def test_quarantine_records_a_non_permissible_signal(inbox, audit):
     assert kinds == ["quarantined"]
 
 
-def test_admission_and_duplicate_are_both_audited(inbox, audit, tmp_path):
+def test_replays_do_not_grow_the_audit_ledger(inbox, audit, tmp_path):
+    """The ledger records decisions, not poll cycles.
+
+    ``watch.py`` hands every handled artifact back on every poll, so the rows
+    this used to append per cycle were the whole 2026-09-29 incident: measured
+    live, 151,976 ``deduped`` rows across 72 distinct artifacts (~3,000/hour),
+    growing an unprunable SHA-256 chained ledger to 82 MB.
+    """
     path = drop(tmp_path, v11_doc())
 
-    inbox.admit(path)
-    inbox.admit(path)
+    assert inbox.admit(path).kind == ACCEPTED
+    for _ in range(5):
+        assert inbox.admit(path).kind == DEDUPED
 
-    kinds = [row["kind"] for row in audit.read()]
-    assert kinds == ["admitted", "deduped"]
+    assert [row["kind"] for row in audit.read()] == ["admitted"]
 
 
 def test_the_written_row_is_hash_free_and_replayable(inbox, tmp_path):

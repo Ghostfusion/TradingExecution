@@ -11,6 +11,11 @@ one. Two properties matter and are both tested:
 * **Never silent** — an unreadable, non-compliant, hash-mismatched or expired
   artifact is dead-lettered with a machine-readable ``reason_code``; a
   produced-but-not-permissible signal is quarantined. Both are audited.
+* **The ledger records decisions, not poll cycles** — ``watch.py`` hands the
+  same artifact back every poll, so a re-admission returns ``deduped`` and
+  writes nothing: the durable record of it is the ``inbox.jsonl`` state row plus
+  the ``admitted`` ledger row, written the first time. Third occurrence of this
+  bug class — see ``CHANGELOG.md`` 2026-09-15, 2026-09-16 and 2026-09-29.
 
 The key is stable across replays: ``service:run_id:artifact_sha256`` when the
 producer supplies them, else the decision hash, else the canonical body hash.
@@ -159,7 +164,6 @@ class Inbox:
                     stamp = ":gone"
                 key = f"unreadable:{p.name}{stamp}"
                 if self.seen(key):
-                    self._audit_row("deduped", "already dead-lettered (unreadable)", key, p)
                     return Admission(DEDUPED, key, p, detail="duplicate dead letter")
                 return self._dead_letter(None, EnvelopeError("unreadable", str(exc)), p, key=key)
         else:
@@ -170,9 +174,6 @@ class Inbox:
             validate_envelope(body, now=now)
         except EnvelopeError as exc:
             if self.seen(key):
-                self._audit_row(
-                    "deduped", f"already dead-lettered ({self.state_of(key)})", key, p
-                )
                 return Admission(DEDUPED, key, p, raw=body, detail="duplicate dead letter")
             producer = body.get("producer") if isinstance(body.get("producer"), dict) else {}
             return self._dead_letter(
@@ -180,7 +181,12 @@ class Inbox:
             )
 
         if self.seen(key):
-            self._audit_row("deduped", f"already admitted ({self.state_of(key)})", key, p)
+            # A replay of an already-admitted key is not a decision, and the watch
+            # tree hands every handled artifact back on every poll: the dedupe
+            # table already records it, so the ledger writes nothing. The three
+            # rows that used to be appended here were the entire 2026-09-29
+            # incident - 151,976 ``deduped`` rows across 72 artifacts (~3,000/hour,
+            # 82 MB of an unprunable SHA-256 chained ledger).
             return Admission(DEDUPED, key, p, raw=body, detail="duplicate artifact")
 
         self._record(key, "admitted", body, p, schema_version=body.get("schema_version"))
