@@ -4,7 +4,10 @@ Design (plan §4.5/§4.7): ``signals.jsonl`` is the canonical append-only feed,
 ``latest.json`` holds the last envelope per ticker, the journal records every
 processed decision_hash (idempotency) plus emitted signals (daily caps,
 cooldown), and the audit ledger is SHA-256-chained — a single edit breaks every
-subsequent link and ``verify`` reports the first bad index.
+subsequent link and ``verify`` reports the first bad index. Ledger appends are
+serialized across processes: two concurrent appenders read the same tail, link to
+it and **fork** the chain, which ``verify`` then reports as corruption nobody
+caused (see ``_cross_process_lock``).
 """
 
 from __future__ import annotations
@@ -13,8 +16,9 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable
-from contextlib import suppress
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +39,67 @@ def _atomic_append(path: Path, text: str) -> None:
     finally:
         with _suppress(OSError):
             os.unlink(tmp)
+
+
+#: A holder that has not finished in this long loses the ledger lock. The audit
+#: write must never be able to stall the daemon, so the lock **fails open**: a
+#: wedged holder is the worse failure, and a raced append is still reported by
+#: ``verify`` rather than hidden.
+_LOCK_TIMEOUT_S = 5.0
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+@contextmanager
+def _cross_process_lock(path: Path) -> Iterator[None]:
+    """Serialize one read-modify-write of ``path`` across processes.
+
+    ``AuditChain.append`` reads the tail, links to it and then writes. Two
+    processes doing that at once read the **same** tail, both link to it, and the
+    chain forks — which ``verify`` reports as corruption even though nothing was
+    edited, so the ledger stops being able to tell tampering from a race.
+    Measured 2026-09-23: four ``mandate_removed`` rows written by the CLI forked
+    the daemon's ledger while it appended ``deduped`` rows (breaks at indices
+    66520, 66521, 66527, 66528).
+
+    A sidecar lock file makes the read and the write one critical section; a lock
+    whose holder is gone is taken over, the way ``DaemonLock`` reclaims a stale
+    pid file.
+    """
+    lock = path.with_name(path.name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + _LOCK_TIMEOUT_S
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            try:
+                holder = int(lock.read_text(encoding="utf-8").strip() or 0)
+            except (OSError, ValueError):
+                holder = 0
+            if holder and not _pid_alive(holder):
+                with _suppress(OSError):
+                    os.unlink(lock)  # the holder is gone: take the lock over
+                continue
+            if time.monotonic() > deadline:
+                with _suppress(OSError):
+                    os.unlink(lock)  # wedged holder: fail open, stay audible
+                continue
+            time.sleep(0.005)
+    try:
+        os.write(fd, str(os.getpid()).encode("utf-8"))
+        yield
+    finally:
+        os.close(fd)
+        with _suppress(OSError):
+            os.unlink(lock)
 
 
 class SignalStore:
@@ -191,23 +256,27 @@ class AuditChain:
         self._now = now
 
     def append(self, kind: str, reason: str, **data: Any) -> dict[str, Any]:
-        prev_hash = "0" * 64
-        rows = self.read()
-        if rows:
-            prev_hash = rows[-1]["hash"]
-        row = {
-            "index": len(rows),
-            "ts": self._now().isoformat(timespec="seconds"),
-            "kind": kind,
-            "reason": reason,
-            "data": data,
-            "prev_hash": prev_hash,
-        }
-        body = json.dumps(
-            {k: v for k, v in row.items() if k != "hash"}, sort_keys=True, default=str
-        )
-        row["hash"] = hashlib.sha256((prev_hash + body).encode("utf-8")).hexdigest()
-        _atomic_append(self.path, json.dumps(row, sort_keys=True) + "\n")
+        # The read, the link and the write are one critical section: a second
+        # process appending in the gap would link to the same tail and fork the
+        # chain. See _cross_process_lock.
+        with _cross_process_lock(self.path):
+            prev_hash = "0" * 64
+            rows = self.read()
+            if rows:
+                prev_hash = rows[-1]["hash"]
+            row = {
+                "index": len(rows),
+                "ts": self._now().isoformat(timespec="seconds"),
+                "kind": kind,
+                "reason": reason,
+                "data": data,
+                "prev_hash": prev_hash,
+            }
+            body = json.dumps(
+                {k: v for k, v in row.items() if k != "hash"}, sort_keys=True, default=str
+            )
+            row["hash"] = hashlib.sha256((prev_hash + body).encode("utf-8")).hexdigest()
+            _atomic_append(self.path, json.dumps(row, sort_keys=True) + "\n")
         return row
 
     def read(self) -> list[dict[str, Any]]:

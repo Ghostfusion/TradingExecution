@@ -2,6 +2,49 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-29 — the audit ledger: cleared on request, and the append race that was already in it
+
+The owner asked for the 152,369 `deduped` rows to be cleared. Compacting a SHA-256 chained ledger surfaced a
+worse defect underneath, and the pair is recorded together because the second is why the first was needed twice.
+
+**The original ledger was already corrupt, and not by an edit.** The archived original fails `verify` at rows
+66,520, 66,521, 66,527 and 66,528 — every break a `prev_mismatch`, every rogue row a `mandate_removed`:
+
+```
+[66519] deduped          prev=dadd2a… hash=096cb9…
+[66520] mandate_removed  prev=dadd2a…   <- same tail: a second process linked to it
+[66521] deduped          prev=096cb9…   <- the daemon carried on from its own row
+```
+
+`AuditChain.append` read the tail, linked to it, then wrote. The daemon and a `signald mandate-remove` run
+against the same `--data` are two processes doing that, so they read the **same** tail and forked the chain.
+`verify` then reported CORRUPT — the one message that must always mean tampering, spent on a race.
+
+- **`signald/stores.py::_cross_process_lock`** — `append` now takes a sidecar lock around read+write, with
+  stale-holder takeover like `DaemonLock`, and **fails open after 5 s** so a wedged holder can never stall the
+  daemon. The trade is deliberate and stated in the code: a raced append is still reported by `verify`, a stopped
+  daemon is silent. Test: `tests/test_stores.py::test_concurrent_appends_do_not_fork_the_chain` — two writers,
+  the read slowed to widen the read→write gap; fails before the fix (row 1 already CORRUPT, 2/2 runs), passes
+  after. Suite 1138 green, ruff clean.
+- **The compaction.** Original archived to `signals/audit/audit.jsonl.pre-dedup-20260929.bak` (unmodified, chain
+  as written), the surviving 1,548 rows re-linked and verified, then one `ledger_compacted` row appended through
+  the normal `AuditChain.append` path — which also proves the re-linked chain is appendable:
+
+```
+153,917 rows / 82.7 MB  ->  1,549 rows / 734 KB     (dropped 152,369 deduped)
+signald verify --audit signals/audit/audit.jsonl  ->  OK — 1549 rows chained
+```
+
+- **`AuditChain.append` re-reads the whole ledger to find the tail**, so the flood was not only 82 MB of noise:
+  every append was O(n) on top of it, and the daemon's heartbeat was touching **67–69 s** apart while it ran on
+  153k rows. Compaction is what puts the poll cycle back on the poll interval.
+- **A trap found while verifying.** `signald verify` / `status` with no `--data` read the **config default**
+  `./audit/audit.jsonl`, not the ledger the daemon writes (`--data .\signals` → `signals/audit/audit.jsonl`).
+  Both printed `OK — 5 rows chained` against a file the daemon never touches. Documented in
+  `docs/RUNBOOK.md` (with the compaction procedure) and `docs/AGENT_ONBOARDING.md` §2.
+- **Not deleted:** the 82.7 MB archive stays. It is the only copy of the fork evidence and of everything the
+  daemon decided before today.
+
 ## 2026-09-29 — a restart is two steps: `schtasks /end` does not stop the daemon
 
 `docs/RUNBOOK.md` documented `/end` as ending "the process tree" and the `heartbeat_loss` recovery as one

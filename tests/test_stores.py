@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import datetime, timedelta
 
 import pytest
@@ -41,6 +43,46 @@ def test_audit_tamper_breaks_chain(tmp_path):
 def test_audit_empty_ledger_verifies(tmp_path):
     ok, idx, _ = AuditChain(tmp_path / "audit.jsonl", lambda: NOW).verify()
     assert ok and idx == -1
+
+
+def test_concurrent_appends_do_not_fork_the_chain(tmp_path, monkeypatch):
+    """Two writers must never link to the same tail.
+
+    ``append`` reads the tail, links to it, then writes. The daemon and the CLI
+    are exactly two processes doing that, and on 2026-09-23 they interleaved:
+    four ``mandate_removed`` rows forked the ledger while the daemon appended
+    ``deduped`` rows (breaks at indices 66520, 66521, 66527, 66528) and ``verify``
+    said CORRUPT — which is the one message that must always mean tampering. The
+    read is slowed here to widen the read→write gap the lock closes.
+    """
+    path = tmp_path / "audit.jsonl"
+    real_read = AuditChain.read
+
+    def slow_read(self):
+        rows = real_read(self)
+        time.sleep(0.05)
+        return rows
+
+    monkeypatch.setattr(AuditChain, "read", slow_read)
+
+    def writer(name):
+        ledger = AuditChain(path, lambda: NOW)
+        for i in range(5):
+            ledger.append(name, f"row {i}")
+
+    threads = [threading.Thread(target=writer, args=(name,)) for name in ("daemon", "cli")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ledger = AuditChain(path, lambda: NOW)
+    ok, idx, detail = ledger.verify()
+    assert ok, detail
+    assert idx == -1
+    rows = ledger.read()
+    assert len(rows) == 10
+    assert [r["index"] for r in rows] == list(range(10))
 
 
 def test_journal_idempotency(tmp_path):

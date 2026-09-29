@@ -118,6 +118,42 @@ py -3.12 -m signald watchdog --heartbeat .\signals\audit\heartbeat
   every poll *before* the window check, so a closed market is fresh and only a stopped or wedged daemon pages
   (`heartbeat_loss` to the notifier). **A deliberate stop must disable the task** —
   `schtasks /change /tn Signald_Watchdog /disable` — or it pages every 5 minutes until you do.
+- **The audit ledger has the same `--data` trap, and it is compactable.** `signald verify` and
+  `signald status` resolve state from the **config default** (`./audit/audit.jsonl`) unless they are given
+  `--data`, which is not the tree the daemon writes (`--data .\signals` → `signals\audit\...`). Measured
+  2026-09-29: `signald verify` reported `OK — 5 rows chained` while the daemon's live ledger held 153,917 rows
+  and had four forks in it. Name the daemon's ledger explicitly:
+
+```powershell
+py -3.12 -m signald verify --audit .\signals\audit\audit.jsonl
+```
+
+  Because the chain is append-only, a ledger whose growth is pure noise cannot be edited — it is **re-linked**
+  with the daemon stopped, which keeps the surviving rows verifiable, and the original is archived exactly as it
+  was written. Executed once, 2026-09-29: 152,369 `deduped` rows dropped, 82.7 MB → 734 KB. The archive
+  (`signals\audit\audit.jsonl.pre-dedup-20260929.bak`) is unmodified, so it still reports the four pre-existing
+  forks (see the CHANGELOG entry for that date — retained as evidence, not re-linked):
+
+```python
+# stop the daemon first (see the restart note above)
+import hashlib, json, os, pathlib
+p = pathlib.Path(r"signals\audit\audit.jsonl")
+bak = p.with_name(p.name + ".pre-dedup.bak")
+os.replace(p, bak)                                  # archive the original, untouched
+rows = [json.loads(l) for l in bak.read_text(encoding="utf-8").splitlines() if l.strip()]
+prev = "0" * 64
+with p.open("w", encoding="utf-8", newline="\n") as out:
+    for i, row in enumerate(r for r in rows if r.get("kind") != "deduped"):
+        row = {k: v for k, v in row.items() if k != "hash"}
+        row["index"], row["prev_hash"] = i, prev
+        body = json.dumps(row, sort_keys=True, default=str)
+        row["hash"] = prev = hashlib.sha256((prev + body).encode("utf-8")).hexdigest()
+        out.write(json.dumps(row, sort_keys=True) + "\n")
+# then: py -3.12 -m signald verify --audit .\signals\audit\audit.jsonl   (expect OK)
+```
+
+  This is a procedure rather than a verb because the defect that made it necessary is fixed (CHANGELOG
+  2026-09-29) — if a kind ever floods again, it deserves a CLI command instead.
 - **After a host reboot**, logging on starts the daemon (logon trigger) and the watchdog resumes on its next
   slot — `StartWhenAvailable` lets a slot missed while the machine was off run as soon as it is back. A reboot
   with nobody logging on leaves the daemon down; that is the interactive-token tradeoff above, stated here so

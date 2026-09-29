@@ -118,6 +118,12 @@ py -3.12 -m ruff check signald/ tests/
    Keep the touched scope clean; don't regress the repo.
 4. **`.env`** holds real keys — gitignored, never printed/committed.
    `TRADINGEXEC_*` + `ALPACA_*` overrides live there, not in code.
+5. **The CLI's state is not the daemon's state unless you pass `--data`.** `Config` defaults every state path
+   to the repo root (`./audit/audit.jsonl`, `./audit/heartbeat`, `./audit/journal.jsonl`), while the daemon runs
+   `--data .\signals` and therefore writes `signals\audit\...`. A bare `signald verify` / `status` / `watchdog`
+   checks the **default** tree and can print a cheerful `OK — 5 rows chained` for a ledger the daemon never
+   touches (measured 2026-09-29 — the live one held 153,917 rows). Pass `--data .\signals`, or `--audit
+   .\signals\audit\audit.jsonl`. `mandate.json` is *not* under `--data`, so the mandate itself does not diverge.
 
 ## 3. What this project does (execution layer)
 
