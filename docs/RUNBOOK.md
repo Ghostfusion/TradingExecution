@@ -130,7 +130,10 @@ py -3.12 -m signald verify --audit .\signals\audit\audit.jsonl
 
   Because the chain is append-only, a ledger whose growth is pure noise cannot be edited — it is **re-linked**
   with the daemon stopped, which keeps the surviving rows verifiable, and the original is archived exactly as it
-  was written. Executed once, 2026-09-29: 152,369 `deduped` rows dropped, 82.7 MB → 734 KB. The archive
+  was written. The size is not cosmetic: `AuditChain.append` re-reads the whole ledger to find the tail, so the
+  ledger's size *is* the daemon's cycle time (measured 2026-09-29: 153k rows → heartbeat gaps of 67–69 s;
+  1.5k rows → 10.3 s, the poll interval). Executed once, 2026-09-29: 152,369 `deduped` rows dropped,
+  82.7 MB → 734 KB. The archive
   (`signals\audit\audit.jsonl.pre-dedup-20260929.bak`) is unmodified, so it still reports the four pre-existing
   forks (see the CHANGELOG entry for that date — retained as evidence, not re-linked):
 

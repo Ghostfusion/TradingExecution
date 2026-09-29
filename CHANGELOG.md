@@ -37,7 +37,8 @@ signald verify --audit signals/audit/audit.jsonl  ->  OK — 1549 rows chained
 
 - **`AuditChain.append` re-reads the whole ledger to find the tail**, so the flood was not only 82 MB of noise:
   every append was O(n) on top of it, and the daemon's heartbeat was touching **67–69 s** apart while it ran on
-  153k rows. Compaction is what puts the poll cycle back on the poll interval.
+  153k rows. Compaction is what puts the poll cycle back on the poll interval — measured after the restart,
+  **13 heartbeat touches in 120 s, gaps of 10.3 s**.
 - **A trap found while verifying.** `signald verify` / `status` with no `--data` read the **config default**
   `./audit/audit.jsonl`, not the ledger the daemon writes (`--data .\signals` → `signals/audit/audit.jsonl`).
   Both printed `OK — 5 rows chained` against a file the daemon never touches. Documented in
