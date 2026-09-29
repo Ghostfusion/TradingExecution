@@ -2,6 +2,28 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-09-29 — a restart is two steps: `schtasks /end` does not stop the daemon
+
+`docs/RUNBOOK.md` documented `/end` as ending "the process tree" and the `heartbeat_loss` recovery as one
+`schtasks /run`. Observed live while restarting to pick up the ledger fix:
+
+- `schtasks /end /tn Signald_Daemon` returned SUCCESS and terminated the task's `cmd.exe` wrapper. The **python
+  daemon it launched survived**, kept the PID lock and kept heartbeating.
+- The immediate `schtasks /run` started a second `cmd.exe`, hit `DaemonLock.acquire`'s `AlreadyRunning`, and
+  exited **`Last Result: 1`** — with the task reading `Status: Ready` and the *pre-restart* code still serving
+  the watch tree. A restart that reports success and is not one.
+- The working sequence: `/end` → `taskkill /PID <pid> /T /F` → `/run` → verify a **new** pid in
+  `signals/signald.pid` and an advancing heartbeat. Executed 11:42 CT: pid 28108 → 17380, task `Running`,
+  heartbeat fresh, kill switch armed.
+
+`docs/RUNBOOK.md` is corrected in both places (supervision section, `heartbeat_loss` row). No daemon behaviour
+changed — `/end`'s scope is Task Scheduler's, not ours — but an operator following the documented line would
+have left the daemon down and believed it running.
+
+The restart is also the production proof of the entry below: **4 rows in 3.5 minutes** against 46–197/minute
+before, all four real decisions on a newly-arrived artifact (INCY: `admitted` → `rejected` → `monitor` →
+`quarantined`), and **zero `deduped`**.
+
 ## 2026-09-29 — the inbox's dedupe rows were growing the audit ledger without bound
 
 The 2026-09-15 fix silenced the processor's duplicate skip — "the ledger records decisions, not poll cycles" —

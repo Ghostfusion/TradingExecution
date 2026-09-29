@@ -60,6 +60,24 @@ trusting the pair:
 
 So: use `schtasks /end` only when you intend to leave it down, and prefer `--once` for a manual check.
 
+**A restart is a two-step, not a one-step (observed 2026-09-29).** `schtasks /end /tn Signald_Daemon` terminates
+the task's `cmd.exe` wrapper and **not** the python daemon it launched. The child survives, keeps the PID lock
+and keeps heartbeating, so the immediate `schtasks /run` starts a second `cmd.exe`, hits
+`DaemonLock.acquire`'s `AlreadyRunning`, and exits **`Last Result: 1`** — while `Status` reads `Ready` and the
+*pre-restart* code is still the process serving the watch tree. The documented one-liner therefore looks like a
+restart and is not one. What works:
+
+```powershell
+schtasks /end /tn Signald_Daemon                        # ends the wrapper
+taskkill /PID <pid in signals/signald.pid> /T /F        # the orphaned python child is the daemon
+schtasks /run /tn Signald_Daemon                        # takes over the now-stale lock
+py -3.12 -m signald status                              # heartbeat fresh, kill switch armed
+```
+
+**Verify by PID, not by `Status`.** `signals/signald.pid` must carry a new pid whose `CreationDate` is after the
+restart, and the heartbeat must advance. `DaemonLock.acquire` reclaims a stale file only once the recorded pid
+no longer opens, so leaving the child alive blocks the restart exactly as the lock is designed to.
+
 **OWNER DECISION (2026-09-20): recovery stays MANUAL.** Asked whether the watchdog should also
 restart the daemon, widen its window, or stay as it is, the owner chose **status quo**. So:
 the watchdog pages and nothing auto-restarts, and the `heartbeat_loss` row below remains the
@@ -151,7 +169,7 @@ One row per alert in §9.4.  Alerts are emitted to the notifier (Discord webhook
 | `duplicate_client_order_id` | Stop the submitting loop; query the broker for the in-flight id before any retry. |
 | `kill_switch` | Confirm the sentinel is present and the episode latch written; begin re-arm only after a post-mortem. |
 | `sleeve_ceiling_hit` | Expected on a full sleeve; no action unless it fires weekly without a novel cause. |
-| `heartbeat_loss` | Assume the daemon is down; `py -3.12 -m signald status`, inspect `signals/signald_daemon.log` and `signals/signald.pid`, then `schtasks /run /tn Signald_Daemon` (the PID lock refuses a second instance if it was only wedged — end the task first, `schtasks /end /tn Signald_Daemon`). |
+| `heartbeat_loss` | Assume the daemon is down; `py -3.12 -m signald status`, inspect `signals/signald_daemon.log` and `signals/signald.pid`, then `schtasks /run /tn Signald_Daemon`. The PID lock refuses a second instance if the old one is only wedged or orphaned, so end it first — and `schtasks /end` ends only the task wrapper (2026-09-29: the python child survived it and held the lock), so confirm the recorded pid is gone and `taskkill /PID <pid> /T /F` if it is not. Verify the restart by a **new** pid in `signals/signald.pid`, not by task `Status`. |
 
 ---
 
