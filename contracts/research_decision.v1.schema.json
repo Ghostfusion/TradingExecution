@@ -45,10 +45,19 @@
       "type": ["object", "null"],
       "properties": {
         "target_notional": {"type": ["number", "null"]},
+        "entry_price": {
+          "type": ["number", "null"],
+          "description": "Advisory: §100's final entry price (the §103 block's final_entry_price), falling back to the G1 contract's stop anchor. Null means unmeasured - never the spot price. The executor derives its own fills and refuses LLM-supplied entry prices."
+        },
         "stop_loss": {"type": ["number", "null"]},
         "take_profit": {"type": ["number", "null"]},
         "size_pct_book": {"type": ["number", "null"]}
       },
+      "additionalProperties": true
+    },
+    "entry_exit": {
+      "type": ["object", "null"],
+      "description": "Advisory §103 ENTRY/EXIT price object, verbatim from the trade-plan card this run rendered: every entry ceiling with its status/coverage, the §100 final entry and the term that bound it, the §101 exit levels and predicate, and the exits the run could NOT measure. The executor parses the four position members it knows and ignores this.",
       "additionalProperties": true
     },
     "data_quality": {
