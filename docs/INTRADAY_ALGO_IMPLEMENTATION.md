@@ -165,7 +165,7 @@ Additive to today's `schema_version: 1` (current `ResearchDecision` keeps every 
   "confidence": 0.72,
   "thesis": "…",
   "rationale": "…",
-  "recommended_allocation_pct": 0.55,
+  "recommended_allocation_pct": 2.42,
   "position": {"target_notional": null, "stop_loss": 429.0, "take_profit": null, "size_pct_book": 0.0242},
   "data_quality": "fresh",
   "price_caliber": "adjusted",

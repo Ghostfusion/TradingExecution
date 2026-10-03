@@ -90,16 +90,45 @@ def test_build_signal_contract_maps_fields():
     assert c.target_notional_usd == 0.0
 
 
-def test_allocation_percent_tolerance():
-    rd = parse_research_decision(_sample(allocation_pct=55.0))
-    c = build_signal_contract(rd, "2027-01-01", datetime(2026, 9, 3, 12, 0), None)
-    assert c.target_pct == 0.55
+def test_allocation_pct_is_a_percent_at_every_scale():
+    """The unit is decided: ``recommended_allocation_pct`` is 0..100 PERCENT.
+
+    The producer's own schema declares it ``ge=0, le=100``, ``reporting.py``
+    multiplies the book fraction by 100, and the authoritative contract
+    (``contracts/research_decision.v1.schema.json``, owner-designated 2026-10-03)
+    states "in percent". The previous conversion fired only when ``pct > 1.0``,
+    so every allocation in (0, 1] percent was read as a fraction - a 100x error.
+    """
+    for percent, expected in (
+        (55.0, 0.55),
+        (2.42, 0.0242),
+        (100.0, 1.0),
+        (1.0, 0.01),
+        (0.5, 0.005),
+        (0.1, 0.001),
+        (0.0, 0.0),
+    ):
+        rd = parse_research_decision(_sample(allocation_pct=percent))
+        c = build_signal_contract(rd, "2027-01-01", datetime(2026, 9, 3, 12, 0), None)
+        assert c.target_pct == pytest.approx(expected), (percent, c.target_pct)
+
+
+def test_a_sub_one_percent_allocation_is_not_read_as_a_fraction():
+    """Failing-first for the (0, 1] percent band: 0.5% is 0.005, never 0.5.
+
+    Before the fix this returned 0.5 (50%) and derived a $50,000 notional on a
+    $100,000 book from a 0.5% instruction.
+    """
+    rd = parse_research_decision(_sample(allocation_pct=0.5))
+    c = build_signal_contract(rd, "2027-01-01", datetime(2026, 9, 3, 12, 0), book_equity=100000.0)
+    assert c.target_pct == pytest.approx(0.005)
+    assert c.target_notional_usd == pytest.approx(500.0)
 
 
 def test_notional_from_equity_when_no_target():
-    doc = _sample(allocation_pct=0.1, direction="add")
+    doc = _sample(allocation_pct=2.0, direction="add")  # 2.0 PERCENT, not a fraction
     rd = parse_research_decision(doc)
     c = build_signal_contract(rd, "2027-01-01", datetime(2026, 9, 3, 12, 0), book_equity=100000.0)
-    assert c.target_notional_usd == 10000.0
+    assert c.target_notional_usd == 2000.0
     assert c.action == "BUY"
     assert c.implies_short is False

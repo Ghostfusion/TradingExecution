@@ -12,7 +12,7 @@ order without a mandate; research is advisory, execution is committed.
 
 ## Status
 
-- **P0–P6 of the two-sleeve build implemented (1102 hermetic tests green, ruff
+- **P0–P6 of the two-sleeve build implemented (1139 hermetic tests green, ruff
   clean):** on top of the Phase-A signal daemon — the versioned boundary
   (contracts + inbox + dead-letter), the sleeve router and budgets, the 16-check
   house risk gate with precedence and `binding_gate`, one sizer, the full paper
@@ -103,6 +103,10 @@ The research/analysis layer never knows which mode is active.
 3. **No lookahead** — signals bind to `effective_date`; reference prices are PIT.
 4. **Deterministic** — gates/sizes/calibers are pure functions; the daemon never parses prose.
 5. **Dry-run default** — logs what WOULD be emitted; `--execute` opts into paper.
+6. **One unit per field** — `recommended_allocation_pct` is a **percent** (0..100) and
+   `position.size_pct_book` is a **book fraction**; they are not interchangeable. The conversion
+   used to fire only when the value exceeded `1.0`, which read every allocation in (0, 1] percent
+   as a fraction and could size to the per-order cap (2026-10-03, `signald/schema.py::build_signal_contract`).
 
 ## Project layout
 

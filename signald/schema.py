@@ -277,11 +277,18 @@ def build_signal_contract(
     """Pure normalisation: research decision -> agnostic signal contract."""
     action = rd.action()
 
+    # ``recommended_allocation_pct`` is a PERCENT (0..100): the producer's own
+    # schema declares it ``ge=0, le=100``, ``reporting.py`` multiplies the book
+    # fraction by 100, and the authoritative contract
+    # (contracts/research_decision.v1.schema.json) says "in percent".
+    # ``size_pct_book`` below is a BOOK FRACTION and carries a different unit on
+    # purpose. Converting only when ``pct > 1.0`` read every allocation in
+    # (0, 1] percent as a fraction - a 100x error that inflated the derived
+    # notional into the per-order cap, which the gate answers by shrinking TO the
+    # cap, so a 0.5% instruction could size as a cap-sized order.
     pct = rd.recommended_allocation_pct
     if pct is not None:
-        if pct > 1.0:  # tolerate "55" meaning 55%
-            pct = pct / 100.0
-        pct = max(0.0, min(1.0, pct))
+        pct = max(0.0, min(1.0, pct / 100.0))
     else:
         pct = max(0.0, min(1.0, rd.size_pct_book or 0.0))
 

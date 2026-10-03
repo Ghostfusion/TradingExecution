@@ -2,6 +2,50 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-10-03 — the allocation unit was never decided, and the tolerant conversion sized to the cap
+
+The research repo's contract drift guard was failing: its `contracts/research_decision.v1.schema.json`
+carried an owner edit (`minimum: 0, maximum: 100` plus a description on `recommended_allocation_pct`)
+that this repo's published copy did not. **The owner designated the research repo's copy authoritative**,
+so `contracts/research_decision.v1.schema.json` here was overwritten with it — and settling the unit
+exposed a real defect underneath.
+
+**The unit was never decided, and the code guessed twice.** `signald/schema.py::build_signal_contract`
+converted `recommended_allocation_pct` from percent to fraction **only when `pct > 1.0`** ("tolerate
+`55` meaning 55%"). But the contract declares **percent at every scale**: the producer's own debate
+schema says `ge=0.0, le=100.0`, and the research repo is landing the matching `reporting.py` emission
+(book fraction × 100, clamped 0..1 → 0..100) in the same pass — **at HEAD that field was still always
+`None`, so this branch was latent in production and becomes load-bearing the moment that emission
+lands**. Every allocation in **(0, 1] percent** was therefore read as a fraction:
+
+| instruction | old read | derived notional on a $100,000 book |
+|---|---|---|
+| `55.0` (55%) | `0.55` — correct | $55,000 |
+| `1.0` (1%) | `1.0` — **100× too large** | $100,000 |
+| `0.5` (0.5%) | `0.5` — **100× too large** | $50,000 |
+
+The consequence is not a wrong number in a log. `risk/gate.py`'s per-order cap answers an over-cap
+notional by **shrinking to the cap** (plan §4.2 — "shrinking is the right answer"), so a 0.5% instruction
+became a **cap-sized order** instead of a 0.5% one.
+
+- **`signald/schema.py::build_signal_contract`** — `recommended_allocation_pct` is now divided by 100
+  **unconditionally**, then clamped to 0..1. The two fields genuinely differ and the code now says so in a
+  comment: `recommended_allocation_pct` is a **percent**, while `position.size_pct_book` is a **book
+  fraction** (`0.0242` for the same run) — and only the second feeds `max_position_pct` (`schema.py:305`).
+- **Tests.** `tests/test_schema_normalizer.py::test_allocation_pct_is_a_percent_at_every_scale` replaces
+  the old tolerance test and pins seven scales (`100.0→1.0`, `2.42→0.0242`, `1.0→0.01`, `0.5→0.005`,
+  `0.1→0.001`, `0.0→0.0`). `::test_a_sub_one_percent_allocation_is_not_read_as_a_fraction` is the
+  failing-first case — 0.5% must give `target_pct 0.005` and `target_notional_usd 500.0`; it returned
+  `0.5` and `$50,000` before the fix. `test_notional_from_equity_when_no_target` moved from a
+  fraction-shaped `0.1` to an explicit `2.0` percent so the unit is visible in the test itself.
+  Suite **1139 passed**, ruff clean.
+- **`docs/INTRADAY_ALGO_IMPLEMENTATION.md`** — the worked `research_decision.json` example carried
+  `"recommended_allocation_pct": 0.55` beside `"size_pct_book": 0.0242`, i.e. two different units for the
+  same quantity. Now `2.42`, consistent with the 2.42% it represents.
+- **Reported, not annotated.** The schema now documents `recommended_allocation_pct` as percent but leaves
+  `position.size_pct_book` undescribed — which is how the two-unit ambiguity survived. That contract file
+  is the research repo's to own, so the gap is recorded here rather than edited.
+
 ## 2026-09-29 — the audit ledger: cleared on request, and the append race that was already in it
 
 The owner asked for the 152,369 `deduped` rows to be cleared. Compacting a SHA-256 chained ledger surfaced a

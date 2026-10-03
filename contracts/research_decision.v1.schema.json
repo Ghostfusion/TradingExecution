@@ -40,7 +40,12 @@
     "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
     "thesis": {"type": ["string", "null"]},
     "rationale": {"type": ["string", "null"]},
-    "recommended_allocation_pct": {"type": ["number", "null"]},
+    "recommended_allocation_pct": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 100,
+      "description": "The run's measured book size, in percent (the producer's own debate schema declares this field 0..100). Null means unmeasured, never zero. The consumer treats it as a ceiling and may only lower its own size."
+    },
     "position": {
       "type": ["object", "null"],
       "properties": {
