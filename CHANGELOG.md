@@ -2,6 +2,32 @@
 
 Format follows the TradingAgents repo (date-stamped entries, concise what/why).
 
+## 2026-10-14 — the working agreement gains rule 11: an open question is resolved by research, not by asking
+
+Owner standing order, 2026-10-14, mirrored into `docs/AGENT_ONBOARDING.md` §0 (and into
+`TradingAgents/docs/AGENT_ONBOARDING.md` §0 rule 13). Rule 7 already required a deep web search
+*before* a behaviour-changing decision; rule 11 is the **resolution form** of the same discipline and
+says **who** decides a judgement call.
+
+The recurring failure mode it closes is a judgement call dressed as a question: a choice between
+viable approaches gets handed back to the owner, which stalls the task and returns work the evidence
+could have settled. The rule now makes the default **answer it** — an extensive and deep search over
+**primary sources, plural** (the broker/exchange's own docs and API reference, the governing rule or
+regulation, and at least one independent practitioner source, READ rather than described), then
+**adopt the recommended approach**, land it, and record the question, the sources, the decision and
+its falsifier in the commit and in this file. Where sources disagree: the conservative option (this
+repo's own default is fail-closed), the tradeoff named, `[INFERENCE]` marked, and proceed. A menu of
+options is not a deliverable.
+
+Two categories remain questions, and only those: **(a)** a value or contract the owner SET — the
+mandate and its limits, the mode, a spend, a licence, a broker/account choice; **(b)** an action that
+is destructive or irreversible — daemon/mandate/order state, force-pushing, rotating keys (rule 8's
+list). "Asked, awaiting the owner" is a valid state only for those two; anything else parked as "the
+owner's call" is a work item. If a search is genuinely inconclusive and the choice is reversible,
+take the boring option, say it was taken on judgement, and name what would overturn it.
+
+No code, contract or operator state changes: documentation only.
+
 ## 2026-10-03 — the allocation unit was never decided, and the tolerant conversion sized to the cap
 
 The research repo's contract drift guard was failing: its `contracts/research_decision.v1.schema.json`

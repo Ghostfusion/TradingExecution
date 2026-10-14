@@ -85,6 +85,28 @@ Finnhub, vendor chain, analyst tools) do **not** apply here.
    decision on the way in; stay silent on the way past. The lesson from the
    first occurrence generalises: **fix the path, then check every other writer
    of the same event, and test it through the shape `cli._build` builds.**
+11. **An OPEN QUESTION is resolved by research, not by asking (owner standing order, 2026-10-14).**
+    Rule 7 requires a deep web search before a behaviour-changing decision; this rule is its
+    **resolution form** and says **who** decides a judgement call. When a task raises a choice
+    between viable approaches, the default is to answer it: run an **extensive and deep** search
+    over **primary sources, plural** — the broker/exchange's own docs and API reference, the
+    governing rule or regulation, and at least one independent practitioner source (READ them, not
+    their descriptions) — adopt the **recommended** approach, land it, and record the question, the
+    sources, the decision and its falsifier in the commit and in `CHANGELOG.md`.
+    Mirrors `TradingAgents/docs/AGENT_ONBOARDING.md` §0 rule 13.
+    - Where the sources agree, that IS the decision — **a menu of options is not a deliverable.**
+      Where they disagree, take the conservative option (this repo's own default is fail-closed: a
+      gate that cannot run produces no signal or order), name the tradeoff, mark `[INFERENCE]`
+      anything not directly evidenced, and proceed.
+    - **Ask only for OWNER POLICY, never for research:** **(a)** a value or contract the owner SET —
+      the mandate and its limits, the mode, a spend, a licence, a broker/account choice;
+      **(b)** an action that is destructive or irreversible — daemon/mandate/order state,
+      force-pushing, rotating keys (rule 8's list). Everything else is researched, decided, landed
+      and reported.
+    - **Never stall on an open question.** "Asked, awaiting the owner" is a valid state ONLY for
+      those two categories; anything else parked as "the owner's call" is a work item, not a
+      question. If a search is genuinely inconclusive and the choice is reversible, take the boring
+      option, say it was taken on judgement, and name what would overturn it.
 
 ---
 
